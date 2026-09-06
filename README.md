@@ -68,13 +68,17 @@ bytes, so each block carried its own Huffman header; building those tables was
 
 ## Portable builds
 
+The shipping page (payload on jsDelivr, this repo has no game data):
+
+https://chiikabu.github.io/the-browsing-of-isaac/
+
 ```sh
 # single .html, payload inline, no network
 python scripts/recomp/assets/portable.py offline .scratch/game-dist out/isaac.html
 
 # page + payload beside it, for a static host
 python scripts/recomp/assets/portable.py chunks .scratch/game-dist out/ --chunks 33 \
-    --base https://cdn.example.com/c
+    --base https://cdn.jsdelivr.net/gh/chiikabu/boi-portable@main/c
 ```
 
 Payload is split by access pattern, not size. Whole-read files are gzipped; the
