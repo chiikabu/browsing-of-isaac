@@ -7076,3 +7076,65 @@ On a real folder of 33 mods: **32 mods, 89.8 MB in 34 parts, largest part
 19.00 MB.** The 33rd is a 371 MB music pack, left out and reported, because the
 page can only seed 96 MB into the guest arena and a mod it could never load has
 no business on a CDN.
+
+### 21.93 Rounds 78-79: the chunked build stops trusting the CDN
+
+Everything here is a thing that only broke once the build was served from
+jsDelivr rather than from a local static server, which is why none of it showed
+up in the drivers.
+
+**The menus opened onto nothing.** `ship.py` keeps `page-assets/` out of
+`instance_index.json` on purpose -- the pipeline must not seed the page's own
+files into the guest file system -- and `portable.py`'s `plan()` was built from
+that index. So a chunked build shipped no `menu.json`, no font, no cursor:
+`readAsset` returned null, `menuAssets.load()` threw, and IMPORT MOD did nothing
+at all, silently. `plan()` now appends `instance/page-assets/*` itself.
+
+**Byte ranges are not a thing a host can be assumed to honour.** The old probe
+asked for two bytes and accepted a 206. jsDelivr answers 206 with a plausible
+`Content-Range`, then returns bytes from the wrong offset -- four bytes early at
+1 MiB, unrelated data at 5 MiB -- and claims a total 37 bytes over the file.
+A prefix-length check passes that. The probe now reads 64 bytes and checks the
+length *and* the `Content-Range` total against the length the page computes for
+that chunk; on a failure `hooks.noReader` stays set, the reader Worker never
+starts, and every window is a whole GET. In whole-chunk mode the window cache
+stops evicting: dropping a 19 MB piece means fetching it again the moment a
+window lands in it, which was the freeze. `--part-mib` sizes the pieces for a
+host with a per-file limit; at 1 the chunk *is* the window, so no range is ever
+needed at the price of a lot of files.
+
+**The loading bar counts chunks.** The three byte stages are what a served dist
+fetches; a chunked build fetches the same bytes out of three dozen files and
+none of that showed anywhere but a line of text. There is a `chunks` row now,
+hidden on a build with none, and the overall bar takes whichever of bytes and
+chunks is further along -- early on the chunk count is the honest one, because a
+byte total is not known until the piece holding it has arrived.
+
+**Escape stays in fullscreen.** It is the game's own back key and the browser
+takes it to leave fullscreen. `navigator.keyboard.lock(['Escape'])` is the
+sanctioned way to ask for it back, taken on `fullscreenchange` and released on
+exit. A *held* Escape still leaves, so the way out is still there. Chrome and
+Edge have it; elsewhere nothing changes.
+
+**And the mods menu no longer calls itself open before it has rows.** The art is
+fetched, on a served page that takes long enough for a key to arrive in the gap,
+and that keypress found an empty list and did nothing. `open()` sets
+`st.open` after `load()` resolves, and `onKey` swallows keys until there is a
+model rather than guessing.
+
+Verified on the chunked build: saves 15/15 (unlocks, stats and the bestiary
+round trip), mods 20/20, EDIT FILE 11/11.
+
+### 21.94 Round 80: a rebuild that does not invalidate the upload
+
+The keystream seed was `isaac-portable/<a_len>/<b_len>/<chunks>`. Round 78 added
+half a megabyte of page assets to part A, which changed `a_len`, which changed
+the key, which re-scrambled **part B as well**: 29 chunks and 559 MB of
+identical plaintext, different bytes, all of it to upload again.
+
+`chunks --key-b64` takes the key as an argument and `--key-of <index.html>`
+reads it out of an earlier build's page. Rebuilt against the deployed page's
+key, the 29 windowed chunks come out byte for byte what is already on the host
+and only the four part-A chunks have to be sent. The key is obfuscation, not a
+cipher -- it stops a chunk on a CDN from announcing what it is -- so reusing one
+costs nothing.

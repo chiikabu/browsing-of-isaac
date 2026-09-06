@@ -52,6 +52,16 @@ const toggleFullscreen = () => {
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   else if (stage.requestFullscreen) stage.requestFullscreen().then(() => canvas.focus()).catch(() => {});
 };
+// Escape is the game's own back key, and the browser takes it to leave
+// fullscreen. Keyboard Lock is the sanctioned way to ask for it back: while
+// fullscreen, the key reaches the page, and a HELD Escape still leaves, so the
+// way out is still there. Chrome and Edge have it; elsewhere nothing changes.
+document.addEventListener('fullscreenchange', () => {
+  const kb = navigator.keyboard;
+  if (!kb || !kb.lock) return;
+  if (document.fullscreenElement) kb.lock(['Escape']).catch(() => {});
+  else try { kb.unlock(); } catch { /* not held */ }
+});
 window.addEventListener('keydown', (ev) => {
   if (ev.code === 'KeyF' && !ev.repeat && !ev.ctrlKey && !ev.altKey && !ev.metaKey && !$('saves').open && !(window.isaacEditFileMenu && window.isaacEditFileMenu.isOpen())) toggleFullscreen();
   // N flips the FPS readout (round 52c-e; unbound in the game's default keys); the key still reaches the game
@@ -65,6 +75,9 @@ const stages = {
   module: { total: 0, received: 0, done: false },
   image: { total: 0, received: 0, done: false },
   archives: { total: 0, received: 0, done: false },
+  // round 78: a chunked build fetches the same bytes out of three dozen files.
+  // Counted here, and the row stays hidden on a build with no chunks.
+  chunks: { total: 0, received: 0, done: false, unit: 'count' },
   boot: { total: 1, received: 0, done: false },
 };
 let renderQueued = false;
@@ -75,16 +88,25 @@ function render() {
     renderQueued = false;
     for (const [name, s] of Object.entries(stages)) {
       const p = $(`p-${name}`), b = $(`b-${name}`), n = $(`n-${name}`);
+      if (s.unit === 'count' && !s.total) { p.hidden = n.hidden = b.hidden = true; continue; }
+      if (s.unit === 'count') p.hidden = n.hidden = b.hidden = false;
       if (s.total) { p.max = s.total; p.value = s.done ? s.total : Math.min(s.received, s.total); }
       else if (s.done) { p.max = 1; p.value = 1; } else p.removeAttribute('value');
       b.textContent = name === 'boot' ? (s.done ? 'done' : s.received ? 'running' : '')
+        : s.unit === 'count' ? `${s.received} / ${s.total}`
         : s.total ? `${mb(s.done ? s.total : s.received)} / ${mb(s.total)} MB` : (s.received ? `${mb(s.received)} MB` : '');
       n.className = 'name' + (s.done ? ' done' : s.received ? ' active' : '');
     }
-    // the one bar: the bytes of the three fetch stages, the boot as the last per cent
+    // the one bar: the bytes of the three fetch stages, the boot as the last per
+    // cent. On a chunked build the chunk count is the better measure early on,
+    // because a byte total is not known until the piece holding it has arrived,
+    // so the bar takes whichever of the two is further along.
     let tot = 0, got = 0;
     for (const name of ['module', 'image', 'archives']) { const s = stages[name]; if (s.total) { tot += s.total; got += s.done ? s.total : Math.min(s.received, s.total); } }
-    const pct = stages.boot.done ? 100 : tot ? Math.min(99, 100 * got / tot) : 0;
+    const byBytes = tot ? 100 * got / tot : 0;
+    const c = stages.chunks;
+    const byChunks = c.total ? 100 * Math.min(c.received, c.total) / c.total : 0;
+    const pct = stages.boot.done ? 100 : Math.min(99, Math.max(byBytes, byChunks));
     $('bar-fill').style.width = `${pct.toFixed(1)}%`;
   });
 }
@@ -139,20 +161,37 @@ hooks.params = pageDefaults;
 // a single-file build answers with bytes, not URLs: the reader Worker would have
 // nothing to fetch, so it is not started
 hooks.noReader = !!(portable && !portable.urlFor);
+// round 77: a chunked build says which chunk it is on. Hook this before ready:
+// when ranges cannot be trusted, ready waits until every chunk is fetched, and
+// the status line is the only progress that exists for that wait.
+if (portable && portable.chunks) {
+  stages.chunks.total = portable.chunks;
+  render();
+  window.__isaacPortableData.onChunk = (got, total) => {
+    stages.chunks.received = got;
+    stages.chunks.total = total || stages.chunks.total;
+    stages.chunks.done = got >= stages.chunks.total;
+    setStatus(`loading\u2026 chunk ${got} of ${stages.chunks.total}`);
+    render();
+  };
+}
 // a chunked build asks its host whether it does byte ranges before the first read:
 // without them a 1 MiB window would drag a whole chunk behind it
-if (portable && portable.ready) { try { await portable.ready; } catch { /* fall back to whole chunks */ } }
+if (portable && portable.ready) {
+  try { await portable.ready; } catch { /* fall back to whole chunks */ }
+  // round 78: a host whose byte ranges cannot be trusted (jsDelivr answers 206
+  // with the wrong bytes) must not be asked for a range. The Worker is the
+  // thing that sends Range, so it stays off and every window is a whole GET.
+  if (portable.ranges && !portable.ranges()) {
+    hooks.noReader = true;
+    const why = portable.rangesWhy && portable.rangesWhy();
+    if (why) console.warn(`[isaac] byte ranges are off: ${why}. Whole chunks instead.`);
+  }
+}
 // the reads once the engine runs, when there is no Worker to make them
 hooks.preadBytes = portable ? (rel, off, len) => portable.bytesFor(rel, off, len) : null;
 hooks.trail = (portable && portable.trail) || null;
 hooks.chunkKey = (portable && portable.key) || null;
-// round 77: a chunked build says which chunk it is on, because a payload in
-// three dozen files is a progress bar nobody can read otherwise
-if (portable && portable.chunks) {
-  window.__isaacPortableData.onChunk = (got, total) => {
-    setStatus(`loading\u2026 chunk ${got} of ${total}`);
-  };
-}
 const partsOf = (url) => {
   const [path, query] = url.split('?');
   const q = new URLSearchParams(query || '');
@@ -464,7 +503,10 @@ const OPTIONS_KEY = 'c:/isaac/documents/my games/binding of isaac repentance+/op
 const DEFAULT_OPTIONS = ['[Options]', 'Language=0', 'MusicVolume=0.7000', 'MusicEnabled=1',
   'SFXVolume=0.7000', 'MapOpacity=0.3000', 'Fullscreen=0', 'Filter=0', 'Exposure=1.0000',
   'Gamma=1.0000', 'ControllerHotplug=1', 'PopUps=1', 'CameraStyle=1', 'ShowRecentItems=0',
-  'HudOffset=1.0000', 'TryImportSave=0', 'FoundHUD=0', 'EnableMods=1', 'RumbleEnabled=1',
+    // EnableMods=0: a run with mods on earns no achievements until Mom is beaten,
+  // so a first visit does not get them on by our choice. TAB on the mods screen
+  // turns them on, which is what the sign there says.
+  'HudOffset=1.0000', 'TryImportSave=0', 'FoundHUD=0', 'EnableMods=0', 'RumbleEnabled=1',
   'ChargeBars=0', 'BulletVisibility=0', 'TouchMode=1', 'AimLock=1', 'JacobEsauControls=0',
   'AscentVoiceOver=1', 'OnlineHud=0', 'StreamerMode=0', 'OnlinePlayerVolume=6',
   'OnlinePlayerOpacity=10', 'OnlineChatEnabled=1', 'OnlineChatFilterEnabled=1',

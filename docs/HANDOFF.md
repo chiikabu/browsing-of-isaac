@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-05, recomp rounds 26-74: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-80: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -181,6 +181,36 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 80: a rebuild that does not invalidate the upload** (§21.94).
+  The keystream seed was the two stream lengths, so adding page assets to part
+  A re-scrambled part B too -- 559 MB of identical plaintext with different
+  bytes. `portable.py chunks --key-of <index.html>` reuses a deployed page's
+  key: the 29 windowed chunks come out byte for byte what is already hosted and
+  only the four part-A chunks need sending.
+- **Rounds 78-79: the chunked build stops trusting the CDN** (§21.93).
+  Four things that only broke once it was served from jsDelivr. `page-assets/`
+  is kept out of the dist index on purpose, and `plan()` read that index, so a
+  chunked build had no menu art and **IMPORT MOD did nothing, silently**. The
+  range probe now reads 64 bytes and checks the `Content-Range` total, because
+  jsDelivr answers 206 with the **wrong bytes** and a total 37 over the file; on
+  a failure the reader Worker stays off, every window is a whole GET, and the
+  window cache stops evicting (dropping a 19 MB piece was the freeze).
+  `--part-mib` sizes pieces for a host with a per-file limit. The loading bar
+  has a `chunks` row and takes whichever of bytes and chunks is further along.
+  Escape stays in fullscreen through `navigator.keyboard.lock` (a held Escape
+  still leaves). The mods menu waits for its art before calling itself open.
+  Chunked build: **saves 15/15, mods 20/20, edit 11/11**.
+- **Rounds 76-77: the mods menu is the game's, the payload is nobody's** (§§21.90-21.92).
+  The add/remove UI is drawn on the game's own paper sheet with its own font --
+  `menu_overlay.mjs` grew a shared `menuAssets` and a `createPaperMenu` the EDIT
+  FILE menu already used. A mod cannot be added twice, X removes one, and
+  disabling is the page's flag rather than a `disable.it` the engine never reads
+  back. Mods default to **off**, because achievements are locked with them on
+  until Mom is beaten, and nothing is appended to a file name any more -- the
+  yield is applied silently. The chunk files are scrambled with a seekable
+  keystream and the page's modules are minified, so neither announces what it
+  is, and `modpack.py` puts a folder of mods on the same CDN as a catalogue plus
+  parts (**32 mods, 89.8 MB in 34 parts**) that the page fetches on demand.
 - **Round 75: a Huffman table per kilobyte, on both sides** (§21.89).
   The format cuts an entry into 0x400-byte blocks and full-flushes each one, so
   every kilobyte carries its own dynamic Huffman header and costs the decoder a

@@ -360,9 +360,12 @@ export function createPaperMenu(opts) {
 
   const open = async (get, o) => {
     st.get = get; st.onKey = (o && o.onKey) || null;
-    st.cursor = 0; st.top = 0; st.open = true;
-    try { await load(); } catch (e) { st.open = false; log(`[mods] the menu art: ${e.message}`); return; }
-    if (!st.open) return;
+    st.cursor = 0; st.top = 0; st.model = null;
+    // The art is fetched, and on a served page that takes long enough for a key
+    // to arrive in between. Nothing calls itself open until it has rows to show:
+    // a keypress in the gap would have found an empty list and done nothing.
+    try { await load(); } catch (e) { log(`[mods] the menu art: ${e.message}`); return; }
+    st.open = true;
     overlay.hidden = false;
     play('open');
     redraw();
@@ -375,6 +378,7 @@ export function createPaperMenu(opts) {
   const onKey = (ev, down) => {
     if (!st.open) return false;
     if (!down) return true;                      // the menu owns the keys while it is up
+    if (!st.model) return true;                  // drawn but not yet filled: swallow, do not guess
     const rows = rowsOf(), n = rows.length;
     const code = ev.code;
     if (st.onKey && st.onKey(code, ev.key)) return true;

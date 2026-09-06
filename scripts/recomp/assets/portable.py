@@ -36,6 +36,7 @@ import base64
 import gzip
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -189,6 +190,19 @@ def plan(dist: str, skip: set[str]) -> list[dict]:
         if os.path.isfile(p):
             out.append({"rel": e["p"], "path": p, "size": os.path.getsize(p),
                         "dist": "instance/" + e["p"], "instance": e["p"]})
+    # The menus' own art. ship.py keeps page-assets out of the index on purpose,
+    # because the pipeline must not seed the page's files into the guest file
+    # system -- but the page still asks for them by name through readAsset, and a
+    # build without them has menus that open onto nothing.
+    assets = os.path.join(dist, "instance", "page-assets")
+    have = {f["rel"] for f in out}
+    if os.path.isdir(assets):
+        for name in sorted(os.listdir(assets)):
+            q = os.path.join(assets, name)
+            rel = "page-assets/" + name
+            if os.path.isfile(q) and rel not in have:
+                out.append({"rel": rel, "path": q, "size": os.path.getsize(q),
+                            "dist": "instance/" + rel, "instance": rel})
     return out
 
 
@@ -314,7 +328,9 @@ PROVIDER_JS = r"""
       ? new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer())
       : raw;
     cache.set(key, u);
-    if (cache.size > 6) cache.delete(cache.keys().next().value);
+    // whole-chunk mode (jsDelivr): a 19 MB piece that is dropped is fetched
+    // again the next time a window lands in it, which is the freeze. Keep them.
+    if (ranges && cache.size > 6) cache.delete(cache.keys().next().value);
     return u;
   }
   async function ranged(p) {
@@ -356,27 +372,84 @@ PROVIDER_JS = r"""
     var end = len ? Math.min(off + len, f.size) : f.size;
     return span(f.s, f.at + off, f.at + end);
   }
-  // one question, before any window is handed out as a range: a host that ignores
-  // Range would answer every 1 MiB read with a whole chunk
+  // How long chunk i of stream s is on disk. Only meaningful for a raw stream:
+  // a gzipped one is compressed per chunk and its length is not arithmetic.
+  function chunkLen(s, i) {
+    var st = S[s];
+    if (st.gz || typeof st.bytes !== 'number') return -1;
+    var left = st.bytes - i * st.size;
+    return left > st.size ? st.size : left;
+  }
+  // Round 78: one question before any window is handed out as a range, and it has
+  // to be a question a lying host fails. A host that ignores Range answers with a
+  // whole chunk, which the old probe (206 and two bytes) caught. jsDelivr does
+  // worse: it answers 206 with a Content-Range, then returns bytes from the wrong
+  // offset (4 bytes early at 1 MiB; unrelated at 5 MiB) and claims a total 37
+  // bytes over the file. A prefix length check passes. The page already knows
+  // how long the chunk is, so the probe requires that the total in Content-Range
+  // equals that length. Missing the header, or a mismatch, drops to whole GETs,
+  // which are exact on that host.
   async function probeRanges() {
     if (!P.base) return false;
     var b = S.findIndex(function (st) { return !st.gz; });
     if (b < 0) return false;
+    var want = chunkLen(b, 0);
+    if (want < 0) { ranges = false; P.rangesWhy = 'chunk length unknown'; return false; }
     try {
-      var r = await fetch(name(b, 0), { headers: { Range: 'bytes=0-1' } });
-      ranges = r.status === 206 && (await r.arrayBuffer()).byteLength === 2;
-    } catch (e) { ranges = false; }
+      var r = await fetch(name(b, 0), { headers: { Range: 'bytes=0-63' } });
+      if (r.status !== 206) { ranges = false; P.rangesWhy = 'the host answered ' + r.status + ' for a range'; return false; }
+      var got = (await r.arrayBuffer()).byteLength;
+      var cr = r.headers.get('content-range') || '';
+      var total = /\/(\d+)\s*$/.exec(cr);
+      var claimed = total ? Number(total[1]) : -1;
+      ranges = got === 64 && claimed === want;
+      if (!ranges) {
+        P.rangesWhy = 'the host answered a 64-byte range with ' + got + ' byte(s)'
+          + (claimed >= 0 ? ' and calls the file ' + claimed + ' bytes, not ' + want : ' and sent no Content-Range total');
+      }
+    } catch (e) { ranges = false; P.rangesWhy = e.message; }
     return ranges;
+  }
+  function count(s) {
+    var st = S[s];
+    if (typeof st.n === 'number') return st.n;
+    if (typeof st.bytes === 'number' && st.size) return Math.ceil(st.bytes / st.size);
+    return 0;
+  }
+  // When ranges cannot be trusted every window is a whole GET of a 19 MB piece.
+  // Fetch every piece now, six at a time, so a later room does not stall on one.
+  async function prefetchAll() {
+    var jobs = [], s, i, n;
+    for (s = 0; s < S.length; s++) {
+      n = count(s);
+      for (i = 0; i < n; i++) jobs.push([s, i]);
+    }
+    var next = 0;
+    async function worker() {
+      for (;;) {
+        var k = next++;
+        if (k >= jobs.length) return;
+        await piece(jobs[k][0], jobs[k][1]);
+      }
+    }
+    var crew = [], w;
+    for (w = 0; w < Math.min(6, jobs.length); w++) crew.push(worker());
+    await Promise.all(crew);
   }
   window.isaacPortable = {
     manifest: P.manifest,
     index: P.index,
     trail: P.trail || null,
     status: P.status,
-    ready: probeRanges(),
+    ready: (async function () {
+      await probeRanges();
+      if (!ranges) await prefetchAll();
+      return ranges;
+    })(),
     ranges: function () { return ranges; },
     key: KEY,
     chunks: P.chunks || 0,
+    rangesWhy: function () { return P.rangesWhy || null; },
     loaded: function () { return loadedN; },
     // a window inside one raw chunk is a URL with the range in its fragment; the
     // reader Worker strips it and sends a Range header (boot_web.mjs)
@@ -449,8 +522,9 @@ def cmd_chunks(args) -> int:
     out_dir = os.path.abspath(args.out)
     data_dir = os.path.join(out_dir, "c")
     os.makedirs(data_dir, exist_ok=True)
-    for old in os.listdir(data_dir):
-        os.remove(os.path.join(data_dir, old))
+    if not args.html_only:
+        for old in os.listdir(data_dir):
+            os.remove(os.path.join(data_dir, old))
 
     # part A is fetched whole, so its pieces may be gzipped; part B is read by
     # range, so its chunks stay raw. The counts land on `--chunks` between them.
@@ -458,10 +532,29 @@ def cmd_chunks(args) -> int:
     b_pieces = max(1, args.chunks - a_pieces)
     a_size = ((a_len + a_pieces - 1) // a_pieces + MIB - 1) // MIB * MIB
     b_size = ((b_len + b_pieces - 1) // b_pieces + WINDOW - 1) // WINDOW * WINDOW
+    if args.part_mib:
+        # Round 78: cut part B to a fixed size instead of to a file count. At 1 the
+        # chunk IS the window, so nothing is ever fetched by range and a host whose
+        # ranges cannot be trusted -- jsDelivr answers them with the wrong bytes --
+        # costs nothing extra. The price is a lot of files.
+        b_size = max(WINDOW, args.part_mib * MIB // WINDOW * WINDOW)
     written = [0]
 
-    key = b"" if args.plain else keystream_key(
-        ("isaac-portable/%d/%d/%d" % (a_len, b_len, args.chunks)).encode("ascii"))
+    # Round 80: the seed is the two stream lengths, so a build that adds one file
+    # to part A re-scrambles part B as well -- half a gigabyte of chunks that
+    # differ only in their keystream. --key-b64 takes the key off an earlier
+    # build's page instead: part B is then byte for byte what is already
+    # uploaded, and only the chunks whose contents really moved need sending
+    # again. `chunks --key-of <index.html>` reads it out of one.
+    if args.plain:
+        key = b""
+    elif args.key_b64:
+        key = base64.b64decode(args.key_b64)
+        if len(key) != 256:
+            raise SystemExit("--key-b64: expected 256 bytes, got %d" % len(key))
+    else:
+        key = keystream_key(
+            ("isaac-portable/%d/%d/%d" % (a_len, b_len, args.chunks)).encode("ascii"))
 
     def emit_for(tag, gz, size):
         def emit(i, b):
@@ -472,10 +565,16 @@ def cmd_chunks(args) -> int:
             written[0] += len(body)
         return emit
 
-    n_a = cut(whole, a_size, emit_for("a", True, a_size))
-    n_b = cut(windowed, b_size, emit_for("b", False, b_size))
-    streams = [{"tag": "a", "size": a_size, "gz": True, "n": n_a},
-               {"tag": "b", "size": b_size, "gz": False, "n": n_b}]
+    if args.html_only:
+        n_a = (a_len + a_size - 1) // a_size
+        n_b = (b_len + b_size - 1) // b_size
+        written[0] = sum(os.path.getsize(os.path.join(data_dir, n))
+                         for n in os.listdir(data_dir) if n.endswith(".bin"))
+    else:
+        n_a = cut(whole, a_size, emit_for("a", True, a_size))
+        n_b = cut(windowed, b_size, emit_for("b", False, b_size))
+    streams = [{"tag": "a", "size": a_size, "gz": True, "n": n_a, "bytes": a_len},
+               {"tag": "b", "size": b_size, "gz": False, "n": n_b, "bytes": b_len}]
     data = {"streams": streams, "files": table, "base": args.base or "./c",
             "index": index_for(args.dist, files), "manifest": manifest_for(args.dist, files),
             "chunks": n_a + n_b, "status": "loading…"}
@@ -507,6 +606,9 @@ def cmd_chunks(args) -> int:
     print("  page %s (%s) -- the modules and the boot trail are in it, nothing else is needed"
           % (os.path.join(out_dir, "index.html"), human(len(html.encode("utf-8")))))
     print("  base URL: %s" % data["base"])
+    if n_a + n_b > 64:
+        print("  %d files: no range is needed at this size, which suits a host whose ranges cannot be trusted"
+              % (n_a + n_b))
     print("  %s" % ("plain: the chunks are the payload as it is"
                     if args.plain else "the chunks are scrambled and the page is minified"))
     if max(a_size, b_size) > 20 * MIB:
@@ -575,8 +677,16 @@ def main(argv=None) -> int:
     p.add_argument("--chunks", type=int, default=12, help="how many files the payload becomes (default 12)")
     p.add_argument("--base", help="where the chunks will be served from (default ./c)")
     p.add_argument("--skip", nargs="*", help="archive file names to leave out")
+    p.add_argument("--part-mib", type=int, default=0,
+                   help="size of each windowed chunk in MiB instead of a file count; 1 makes a chunk "
+                        "one window, so no byte range is ever needed (for hosts whose ranges lie)")
     p.add_argument("--plain", action="store_true",
                    help="leave the chunks as they are and the page readable (the default scrambles both)")
+    p.add_argument("--html-only", action="store_true",
+                   help="rewrite the page without touching the chunk files (the probe, not the payload)")
+    p.add_argument("--key-b64", help="scramble with this key instead of one derived from the sizes, so "
+                                     "chunks that did not change keep the bytes already uploaded")
+    p.add_argument("--key-of", help="take --key-b64 out of an earlier build's index.html")
     p.set_defaults(fn=cmd_chunks)
     p = sub.add_parser("offline")
     p.add_argument("dist"); p.add_argument("out")
@@ -584,6 +694,14 @@ def main(argv=None) -> int:
     p.add_argument("--skip", nargs="*", help="archive file names to leave out")
     p.set_defaults(fn=cmd_offline)
     args = ap.parse_args(argv)
+    if getattr(args, "key_of", None) and not args.key_b64:
+        page = read(args.key_of).decode("utf-8", "replace")
+        m = re.search(r'window\.__isaacPortableData\s*=\s*(\{.*?\});', page, re.S)
+        if not m:
+            raise SystemExit("--key-of: %s carries no portable data" % args.key_of)
+        args.key_b64 = json.loads(m.group(1)).get("key")
+        if not args.key_b64:
+            raise SystemExit("--key-of: %s was built --plain, it has no key" % args.key_of)
     return args.fn(args)
 
 

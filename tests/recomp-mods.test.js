@@ -237,3 +237,14 @@ test('the page ships the new modules, and a portable build inlines them in order
   // everything it imports
   assert.match(portable, /var order = \['boot\.mjs', 'menu_overlay\.mjs', 'zip\.mjs', 'mods\.mjs', 'boot_web\.mjs', 'play\.mjs'\];/);
 });
+
+test('round 78: the menu is not open until it has rows', () => {
+  // st.open was set before the art was fetched, so isOpen() said yes while the
+  // model was still null. On a served page that gap is long enough for a key to
+  // land, find an empty list and do nothing -- the removal that would not happen.
+  const m = readFileSync(join(root, 'scripts', 'recomp', 'web', 'menu_overlay.mjs'), 'utf8');
+  const open = m.slice(m.indexOf('const open = async (get, o) => {'));
+  const body = open.slice(0, open.indexOf('};'));
+  assert.ok(body.indexOf('await load()') < body.indexOf('st.open = true'), 'the art is loaded before it calls itself open');
+  assert.ok(m.includes('if (!st.model) return true;'), 'and a key before the first draw is swallowed, not guessed at');
+});
