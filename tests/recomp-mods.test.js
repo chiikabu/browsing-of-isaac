@@ -1,0 +1,239 @@
+// recomp-mods.test.js -- mods imported from the device (round 74).
+//
+// The parts that are quiet when they break: a path out of an archive that lands
+// somewhere it should not, a mod that goes into the save store, a zip with the
+// mod folder inside it that seeds one level too deep and simply never loads.
+// drive_mods.mjs runs the whole thing through the engine; these pin the pieces.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { safeRel, modId, stripRoots, readMetadata, planMod, seedMods, disableTarget,
+         GUEST_ROOT, USER_ROOT, GUEST_ROOTS, IMPORT_DIR, IMPORT_MARK, MODS_DB, IMPORT_METADATA } from '../scripts/recomp/web/mods.mjs';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const src = (f) => readFileSync(join(root, 'scripts', 'recomp', 'web', f), 'utf8');
+const bytes = (s) => new TextEncoder().encode(s);
+const named = (...names) => names.map((n) => ({ name: n, bytes: bytes(n) }));
+
+test('a path out of an archive that is not a plain relative path is dropped', () => {
+  // this is the one that matters: mods/ and the saves are neighbours in the same
+  // key space, and `..` twice over reaches Documents/My Games
+  assert.equal(safeRel('../../documents/my games/x.dat'), null);
+  assert.equal(safeRel('a/../b'), null);
+  // an absolute path is made relative rather than refused, the way every unzip
+  // tool does it; the seed puts mods/<id>/ in front of whatever comes back, so
+  // it lands inside the mod either way
+  assert.equal(safeRel('/etc/passwd'), 'etc/passwd');
+  assert.equal(safeRel('C:/windows/system32'), null);
+  assert.equal(safeRel('a//b'), null, 'an empty segment is a path we did not write');
+  assert.equal(safeRel('a/b\u0000c'), null);
+  assert.equal(safeRel(''), null);
+  assert.equal(safeRel(null), null);
+  assert.equal(safeRel('x'.repeat(300)), null);
+  // and what is fine stays exactly as it was, backslashes turned round
+  assert.equal(safeRel('content/entities2.xml'), 'content/entities2.xml');
+  assert.equal(safeRel('resources\\gfx\\a.png'), 'resources/gfx/a.png');
+  assert.equal(safeRel('main.lua'), 'main.lua');
+});
+
+test('a mod id is a folder name, and nothing else', () => {
+  assert.equal(modId('Fiend Folio!'), 'fiend-folio');
+  assert.equal(modId('../x'), 'x');
+  assert.equal(modId('  '), null);
+  assert.equal(modId(null), null);
+  assert.equal(modId('A'.repeat(200)).length, 64);
+});
+
+test('the mod folder inside the archive is peeled off', () => {
+  // a download is `ModName/metadata.xml`, not `metadata.xml`, and seeding it as
+  // it comes gives mods/<id>/ModName/metadata.xml, which the game does not load
+  const one = stripRoots(named('Fiend Folio/metadata.xml', 'Fiend Folio/main.lua', 'Fiend Folio/content/a.xml'));
+  assert.equal(one.root, 'Fiend Folio');
+  assert.deepEqual(one.entries.map((e) => e.name), ['metadata.xml', 'main.lua', 'content/a.xml']);
+  // two of them, as a zip of a zip's worth of folders sometimes is
+  const two = stripRoots(named('a/b/metadata.xml', 'a/b/main.lua'));
+  assert.deepEqual(two.entries.map((e) => e.name), ['metadata.xml', 'main.lua']);
+  // already at the top: left alone
+  const flat = named('metadata.xml', 'main.lua');
+  assert.deepEqual(stripRoots(flat).entries.map((e) => e.name), ['metadata.xml', 'main.lua']);
+  // two mods in one archive is not a single root and is not peeled
+  const many = stripRoots(named('one/main.lua', 'two/main.lua'));
+  assert.equal(many.root, null);
+  assert.deepEqual(many.entries.map((e) => e.name), ['one/main.lua', 'two/main.lua']);
+});
+
+test('metadata is read without a DOM, and a broken file costs a name, not the import', () => {
+  assert.deepEqual(readMetadata(bytes('<metadata><name>Fiend Folio</name><directory>fiendfolio</directory></metadata>')),
+    { name: 'Fiend Folio', directory: 'fiendfolio' });
+  assert.deepEqual(readMetadata(bytes('<metadata>\n  <name>\n   Spaced Out\n  </name>\n</metadata>')),
+    { name: 'Spaced Out', directory: null });
+  assert.deepEqual(readMetadata(bytes('<name><![CDATA[Cdata Mod]]></name>')), { name: 'Cdata Mod', directory: null });
+  // the shapes DOMParser would have thrown on
+  assert.deepEqual(readMetadata(bytes('<metadata><name>Tom & Jerry</name>')), { name: 'Tom & Jerry', directory: null });
+  assert.deepEqual(readMetadata(bytes('not xml at all')), { name: null, directory: null });
+  assert.deepEqual(readMetadata(new Uint8Array([0xff, 0xfe, 0x00])), { name: null, directory: null });
+});
+
+test('a plan names the mod, keeps its tree and drops what it should not carry', () => {
+  const p = planMod(named('Fiend Folio/main.lua', 'Fiend Folio/content/a.xml').concat([
+    { name: 'Fiend Folio/metadata.xml', bytes: bytes('<metadata><name>Fiend Folio</name><directory>fiendfolio</directory></metadata>') },
+    { name: 'Fiend Folio/../../documents/my games/binding of isaac repentance+/persistentgamedata1.dat', bytes: bytes('x') },
+  ]), 'download');
+  assert.equal(p.mod.id, 'fiendfolio', 'the directory in the metadata wins');
+  assert.equal(p.mod.name, 'Fiend Folio');
+  assert.equal(p.dropped.length, 1, 'the path that climbed out was dropped, not repaired');
+  assert.deepEqual(p.files.map((f) => f.name).sort(), ['content/a.xml', 'main.lua', 'metadata.xml']);
+  assert.equal(p.madeMetadata, false);
+});
+
+test('a mod with no metadata.xml gets one, because the game skips a folder without it', () => {
+  const p = planMod(named('Some Mod/main.lua', 'Some Mod/content/a.xml'), 'some-mod.zip');
+  assert.equal(p.madeMetadata, true);
+  assert.equal(p.mod.id, 'some-mod');
+  assert.equal(p.mod.name, 'Some Mod');
+  const meta = p.files.find((f) => f.name === 'metadata.xml');
+  assert.ok(meta, 'one was written');
+  assert.deepEqual(readMetadata(meta.bytes), { name: 'Some Mod', directory: 'some-mod' });
+});
+
+test('a mod may not call itself the import row', () => {
+  assert.throws(() => planMod([{ name: 'import-mod/main.lua', bytes: bytes('x') },
+                               { name: 'import-mod/metadata.xml', bytes: bytes('<metadata/>') }], null), /import row/);
+  assert.throws(() => planMod([{ name: '../x', bytes: bytes('x') }], null), /nothing in it/);
+});
+
+test('seeding builds every path itself, under mods/ and nowhere else', async () => {
+  const seen = [];
+  const seed = (path, b) => { seen.push([path, b.length]); return true; };
+  // a store that answers with a mod, a file for a mod that is not installed, and
+  // a state key for each -- only the installed one may be seeded
+  const db = {};
+  const store = {
+    mods: [{ key: 'fiendfolio', value: { id: 'fiendfolio', name: 'Fiend Folio', files: 2, bytes: 4, added: 1 } }],
+    files: [
+      { key: 'fiendfolio/main.lua', value: { bytes: bytes('ab') } },
+      { key: 'fiendfolio/content/a.xml', value: { bytes: bytes('cd') } },
+      { key: 'ghost/main.lua', value: { bytes: bytes('ef') } },
+      { key: 'fiendfolio/../../x.dat', value: { bytes: bytes('gh') } },
+    ],
+    state: [
+      { key: `${GUEST_ROOT}fiendfolio/disable.it`, value: { bytes: new Uint8Array(0) } },
+      { key: `${GUEST_ROOT}ghost/disable.it`, value: { bytes: new Uint8Array(0) } },
+      { key: 'c:/isaac/documents/my games/x.dat', value: { bytes: bytes('no') } },
+      { key: IMPORT_MARK, value: { bytes: new Uint8Array(0) } },
+    ],
+  };
+  // the module reads through its own cursor helpers; a stub database is enough
+  const fake = {
+    transaction: (name) => ({ objectStore: () => ({ openCursor: () => {
+      const rows = store[name].slice();
+      const req = {};
+      queueMicrotask(function step() {
+        if (!rows.length) { req.result = null; req.onsuccess(); return; }
+        const r = rows.shift();
+        req.result = { key: r.key, value: r.value, continue: () => queueMicrotask(step) };
+        req.onsuccess();
+      });
+      return req;
+    } }) }),
+  };
+  void db;
+  const r = await seedMods(fake, seed, null);
+  const paths = seen.map((s) => s[0]);
+  assert.ok(paths.every((p) => GUEST_ROOTS.some((root) => p.startsWith(root))), 'nothing was seeded outside a mods root');
+  // both roots, because the resource layer mounts one and the mod manager scans
+  // the other (round 76)
+  for (const root of GUEST_ROOTS) {
+    assert.ok(paths.includes(`${root}${IMPORT_DIR}/metadata.xml`), `the import row is seeded under ${root}`);
+    assert.ok(paths.includes(`${root}fiendfolio/main.lua`) && paths.includes(`${root}fiendfolio/content/a.xml`), `the mod is seeded under ${root}`);
+  }
+  assert.ok(!paths.some((p) => p.includes('ghost')), 'a file with no mod row behind it is not seeded');
+  assert.ok(!paths.some((p) => p.includes('..')), 'nor a key that climbed out of its own mod');
+  // a disable.it is never seeded back: the flag it stands for lives in the index,
+  // and a mod that is off is left out entirely
+  assert.ok(!paths.some((p) => /disable\.it$/.test(p)), 'no disable.it is seeded');
+  assert.equal(r.mods, 1);
+  assert.equal(r.off, 0);
+});
+
+test('the import row is a mod, and the toggle on it is the button', () => {
+  // the game prints the folder name in its list, so the folder is the label; the
+  // leading space is what keeps it at the top of a sorted list
+  assert.equal(IMPORT_DIR, ' import mod');
+  assert.equal(IMPORT_MARK, 'c:/isaac/mods/ import mod/disable.it');
+  assert.equal(USER_ROOT, 'c:/isaac/documents/my games/binding of isaac repentance+/mods/');
+  // a disable.it under either root names the mod it belongs to, and the sentinel's
+  // is not one of them
+  assert.equal(disableTarget(`${GUEST_ROOT}fiendfolio/disable.it`), 'fiendfolio');
+  assert.equal(disableTarget(`${USER_ROOT}fiendfolio/disable.it`), 'fiendfolio');
+  assert.equal(disableTarget(IMPORT_MARK), null);
+  assert.equal(disableTarget(`${GUEST_ROOT}fiendfolio/main.lua`), null);
+  assert.equal(disableTarget('c:/isaac/documents/my games/binding of isaac repentance+/options.ini'), null);
+  assert.match(IMPORT_METADATA, /<name>IMPORT MOD<\/name>/);
+  const b = src('boot_web.mjs');
+  assert.ok(b.includes('if (isImportMark(key)) {'), 'the pipeline claims that write');
+  assert.ok(b.includes('if (hooks.onModImport) hooks.onModImport();'), 'and asks the page for its menu');
+  assert.ok(b.includes("await stageOk('seed mods', async () => {"), 'mods are seeded as a stage of their own');
+  assert.ok(b.includes("if (!modsOn) { log('  mods=0: no mods, and no import row'); return 0; }"), '?mods=0 leaves it all out');
+  const p = src('play.mjs');
+  assert.ok(p.includes('hooks.onModImport = () => { modsMenu.open(); };'));
+  assert.ok(p.includes("import { createModsMenu } from './mods.mjs';"));
+});
+
+test('importing over a mod replaces it rather than merging into it', () => {
+  // a version that dropped a file would otherwise leave the old one for the seed
+  // to find, and the mod would load carrying a file its author removed
+  const m = src('mods.mjs');
+  assert.ok(m.includes("fs.delete(IDBKeyRange.bound(`${mod.id}/`, `${mod.id}/\\uffff`));"),
+    "the mod's own files go first, in the same transaction as the new ones");
+  assert.ok(m.indexOf('fs.delete(IDBKeyRange.bound') < m.indexOf('for (const f of files) fs.put('), 'and before them');
+});
+
+test('a mod too big to be seeded is refused at the import, not at the next boot', () => {
+  // seedMods stops at SEED_BUDGET, and a mod past it is skipped with a line in a
+  // log nobody reads: the import would say it worked and the game would not change
+  const m = src('mods.mjs');
+  assert.ok(m.includes('if (mod.bytes > SEED_BUDGET) {'), 'checked where the person is looking');
+  assert.ok(m.includes('the game is given ${mib(SEED_BUDGET)} for mods'), 'and said in those terms');
+  assert.ok(m.includes("if (mods.reduce((n, x) => n + x.bytes, 0) > SEED_BUDGET) notes.push("), 'a total that has gone past it is said too');
+});
+
+test('mods and saves are separate databases, and a write under mods/ never reaches the saves', () => {
+  assert.equal(MODS_DB, 'isaac-mods');
+  const b = src('boot_web.mjs');
+  assert.ok(b.includes("const SAVE_DB = 'isaac-saves', SAVE_STORE = 'files';"), 'the save store is untouched');
+  assert.ok(b.includes('function modKeyTaken(key, take) {') && b.includes('if (!modsOn || !underMods(key)) return false;'),
+    'anything under either mods root is claimed before the save path sees it');
+  // round 76: a disable.it is a flag, not a file to keep
+  assert.ok(b.includes('const off = disableTarget(key);') && b.includes('if (modDb) setModEnabled(modDb, off, !take)'),
+    "the engine's own toggle flips the flag the page keeps");
+  assert.ok(b.includes('cfg.isaacPersist = (key, src, ptr, len) => {\n  if (modKeyTaken(key, () => m.HEAPU8.slice(ptr, ptr + len))) return 1;'),
+    'on the write');
+  assert.ok(b.includes('cfg.isaacUnlink = (key, src) => {\n  if (modKeyTaken(key, null)) return 1;'), 'and on the delete');
+});
+
+test('the zip reader is one reader, imported by both menus', () => {
+  const z = src('zip.mjs');
+  assert.match(z, /export async function unzip\(buf\)/);
+  assert.match(z, /export function zipStore\(entries\)/);
+  assert.match(z, /export function archiveKind\(bytes\)/);
+  const p = src('play.mjs');
+  assert.ok(p.includes("import { zipStore, unzip } from './zip.mjs';"));
+  assert.ok(!p.includes('function unzip(buf)'), 'and no longer carries a copy of it');
+  const m = src('mods.mjs');
+  assert.ok(m.includes("import { unzip, archiveKind } from './zip.mjs';"));
+  // a RAR or a 7z is named rather than failing at the central directory
+  assert.ok(m.includes("throw new Error(`this is a .${kind}, and nothing in a browser can open one. `"));
+});
+
+test('the page ships the new modules, and a portable build inlines them in order', () => {
+  const ship = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'ship.py'), 'utf8');
+  assert.match(ship, /PAGE_FILES = \("play\.html", "play\.mjs", "boot_web\.mjs", "menu_overlay\.mjs", "zip\.mjs", "mods\.mjs"\)/);
+  const portable = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'portable.py'), 'utf8');
+  assert.match(portable, /MODULES = \("boot\.mjs", "boot_web\.mjs", "menu_overlay\.mjs", "zip\.mjs", "mods\.mjs", "play\.mjs"\)/);
+  // a blob's imports resolve against the map, so a module must be built after
+  // everything it imports
+  assert.match(portable, /var order = \['boot\.mjs', 'menu_overlay\.mjs', 'zip\.mjs', 'mods\.mjs', 'boot_web\.mjs', 'play\.mjs'\];/);
+});

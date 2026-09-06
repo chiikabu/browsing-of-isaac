@@ -1,0 +1,31 @@
+{
+  "emcc": "EMCC or $EMSDK/upstream/emscripten/emcc",
+  "versionHint": "Emscripten 6.0.5+",
+  "flags": [
+    "native/isaac_host.cpp",
+    "-O2",
+    "-sUSE_WEBGL2=1",
+    "-sMIN_WEBGL_VERSION=2",
+    "-sMAX_WEBGL_VERSION=2",
+    "-sFULL_ES3=1",
+    "-sALLOW_MEMORY_GROWTH=1",
+    "-sFORCE_FILESYSTEM=1",
+    "-sEXIT_RUNTIME=0",
+    "-sMODULARIZE=1",
+    "-sEXPORT_ES6=1",
+    "-sEXPORT_NAME=createIsaacHost",
+    "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,FS,UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8",
+    "-sEXPORTED_FUNCTIONS=_main,_isaac_init,_isaac_tick,_isaac_set_canvas_size,_isaac_canvas_width,_isaac_canvas_height,_isaac_set_mounted,_isaac_is_mounted,_isaac_load_pe,_isaac_pe_loaded,_isaac_sig_count,_isaac_find_sig,_isaac_key_event,_isaac_key_down,_isaac_lua_init,_isaac_lua_ready,_isaac_lua_load_mod_script,_isaac_lua_mods_loaded,_isaac_get_phase,_isaac_set_phase,_isaac_get_status,_isaac_get_last_error,_isaac_frame_count,_isaac_gl_ready,_isaac_read_center_pixel,_isaac_count_nonblack_samples,_isaac_mkdir_p,_malloc,_free",
+    "-sENVIRONMENT=web",
+    "-sGL_SUPPORT_AUTOMATIC_ENABLE_EXTENSIONS=1",
+    "-lGL",
+    "-o",
+    "web/isaac-host.js"
+  ],
+  "notes": [
+    "MODULARIZE=1 + EXPORT_NAME=createIsaacHost for static page glue",
+    "FORCE_FILESYSTEM=1 for MEMFS mounts of user game directory",
+    "USE_WEBGL2=1 for browser canvas",
+    "Single-threaded host (no pthreads); physical Chromebook and file:// behavior remain unvalidated"
+  ]
+}

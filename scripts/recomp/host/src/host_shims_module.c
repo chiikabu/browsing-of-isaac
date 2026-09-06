@@ -1,0 +1,793 @@
+/* host_shims_module.c -- one coherent story for module handles and symbol
+ * lookup, plus the kernel objects the boot path needs.
+ *
+ * WHY THIS IS ONE MODULE AND NOT THREE ANSWERS
+ *
+ * The static walk of the 121 _initterm entries puts GetProcAddress at depth 1
+ * (12 sites) and LoadLibraryA at depth 2 (9 sites), so module handles are not
+ * a one-off: they are a subsystem that has to give consistent answers to
+ * questions asked from several places. Answering each call ad hoc produces a
+ * layer that disagrees with itself later, which is the same failure shape as
+ * two allocators or two calling-convention tables.
+ *
+ * THE MODEL
+ *
+ *   A module handle is a TOKEN.
+ *     - The EXE's handle is the honest one: ISAAC_IMAGE_BASE. That is what
+ *       Windows returns and what __ImageBase-derived code expects to see.
+ *     - Every other module gets a distinct token in [ISAAC_MODULE_BASE, ...),
+ *       guest-side so the guest may hold it, in a range nothing else uses so a
+ *       stray handle is recognisable on sight.
+ *
+ *   Which names resolve: exactly the modules this port actually has, which is
+ *   the 28 DLLs in the import table plus the EXE. Nothing else. In particular
+ *   `kernel32.dll` resolves -- and that single answer is what unblocks the
+ *   boot, because FUN_00aef191 treats a NULL kernel32 handle as fatal
+ *   (0x00aef1c3 `je` -> STATUS_FATAL_APP_EXIT) while it handles a NULL api-set
+ *   handle by design.
+ *
+ *   What GetProcAddress returns: THE SHIM TOKEN. The same 0x0f000000-range
+ *   value the boot path writes into the IAT slot for that symbol. This is the
+ *   important unification -- a function pointer obtained dynamically and one
+ *   obtained from the IAT are then the same value, callable through the same
+ *   isaac_indirect_call path, with the same measured stack purge. Two
+ *   mechanisms here would diverge the moment one of them was wrong.
+ *
+ *   What it returns for a symbol we do not have: NULL, recorded. Callers
+ *   routinely probe for optional APIs and handle NULL deliberately -- the CRT
+ *   asks for SleepConditionVariableCS precisely so it can fall back when it is
+ *   absent -- so screaming on every one would be noise. Instead every NULL is
+ *   recorded once and printed by isaac_module_report(), which turns "what did
+ *   this build fail to provide" into a list rather than an archaeology task.
+ */
+
+#include "isaac_host.h"
+#include "shim_decls.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ----------------------------------------------------------- modules ----- */
+
+#define MAX_MODULES 40
+
+typedef struct {
+    char     name[48];      /* canonical: lower case, with extension */
+    uint32_t handle;
+    uint32_t refs;
+    int      is_exe;
+} module_rec;
+
+static module_rec g_mod[MAX_MODULES];
+static unsigned g_mod_n;
+static int g_mod_ready;
+
+/* NULLs worth reporting: module names we do not have, and symbols we could
+ * not supply. Recorded once each. */
+#define MAX_MISSES 128
+static struct { char what[96]; unsigned hits; } g_miss[MAX_MISSES];
+static unsigned g_miss_n;
+
+static void record_miss(const char *fmt, const char *a, const char *b) {
+    char buf[96];
+    if (b) snprintf(buf, sizeof buf, fmt, a, b);
+    else   snprintf(buf, sizeof buf, fmt, a);
+    for (unsigned i = 0; i < g_miss_n; ++i)
+        if (!strcmp(g_miss[i].what, buf)) { ++g_miss[i].hits; return; }
+    if (g_miss_n >= MAX_MISSES) return;
+    memcpy(g_miss[g_miss_n].what, buf, sizeof buf);
+    g_miss[g_miss_n].hits = 1;
+    ++g_miss_n;
+}
+
+static void lower_copy(char *dst, size_t n, const char *src) {
+    size_t i = 0;
+    for (; src[i] && i + 1 < n; ++i)
+        dst[i] = (src[i] >= 'A' && src[i] <= 'Z') ? (char)(src[i] + 32) : src[i];
+    dst[i] = 0;
+}
+
+static void modules_init(void) {
+    if (g_mod_ready) return;
+    g_mod_ready = 1;
+
+    /* The EXE. Its handle is the image base, as on Windows. */
+    lower_copy(g_mod[0].name, sizeof g_mod[0].name, "isaac-ng.exe");
+    g_mod[0].handle = ISAAC_IMAGE_BASE;
+    g_mod[0].is_exe = 1;
+    g_mod_n = 1;
+
+    /* Every DLL named in the import table -- that is exactly the set this port
+     * has shims for, so it is exactly the set whose handles should be real. */
+    /* Dynamic modules: NOT imported by the image, but loadable at runtime and
+     * resolvable because gen_shims.py emits curated DYNAMIC_EXPORTS rows for
+     * them (same token space, after the IAT rows). */
+    static const char *const dynamic_dlls[] = {
+        /* GLFW's WGL bootstrap (0x00a7fce0) LoadLibraryA("opengl32.dll") at
+         * 0x00a7fd17 and resolves seven wgl* entry points via GetProcAddress
+         * into 0x00c75d44..0x00c75d5c. opengl32.dll is not in the static IAT,
+         * so without this registration the probe returns NULL and boot dies
+         * at 0x00a19fb9 (NULL window object). Strong shims live in
+         * host_shims_gl.c; weak rows are generated by gen_shims.py. */
+        "version.dll", "ntdll.dll", "shcore.dll", "opengl32.dll",
+        /* Gamepad_init (0x00a6d0f0) LoadLibraryA("DINPUT8.dll") and treats a
+         * NULL module as FATAL (abort at 0xb18880); the XInput probes are
+         * deliberately NOT registered so the game takes its benign
+         * "proceeding with DInput only" branch. Curated rows in
+         * gen_shims.py; strong bodies in host_shims_dinput8.c. */
+        "dinput8.dll",
+    };
+    for (unsigned d = 0; d < sizeof dynamic_dlls / sizeof dynamic_dlls[0]; ++d) {
+        if (g_mod_n >= MAX_MODULES) break;
+        snprintf(g_mod[g_mod_n].name, sizeof g_mod[g_mod_n].name, "%s",
+                 dynamic_dlls[d]);
+        g_mod[g_mod_n].handle =
+            ISAAC_MODULE_BASE + g_mod_n * ISAAC_MODULE_STRIDE;
+        ++g_mod_n;
+    }
+    for (unsigned i = 0; i < isaac_import_count; ++i) {
+        const char *dll = isaac_imports[i].dll;
+        char canon[48];
+        lower_copy(canon, sizeof canon, dll);
+        unsigned j = 0;
+        for (; j < g_mod_n; ++j)
+            if (!strcmp(g_mod[j].name, canon)) break;
+        if (j < g_mod_n) continue;
+        if (g_mod_n >= MAX_MODULES) break;
+        memcpy(g_mod[g_mod_n].name, canon, sizeof canon);
+        g_mod[g_mod_n].handle =
+            ISAAC_MODULE_BASE + g_mod_n * ISAAC_MODULE_STRIDE;
+        ++g_mod_n;
+    }
+    isaac_log("[isaac][mod] %u modules resolvable (EXE + %u import DLLs); "
+              "handles 0x%08x..0x%08x",
+              g_mod_n, g_mod_n - 1, ISAAC_MODULE_BASE,
+              ISAAC_MODULE_BASE + g_mod_n * ISAAC_MODULE_STRIDE);
+}
+
+static module_rec *mod_by_name(const char *name) {
+    modules_init();
+    char canon[48];
+    lower_copy(canon, sizeof canon, name);
+    /* Strip any directory prefix: callers sometimes pass a path. */
+    const char *base = canon;
+    for (const char *p = canon; *p; ++p)
+        if (*p == '\\' || *p == '/') base = p + 1;
+    for (unsigned i = 0; i < g_mod_n; ++i)
+        if (!strcmp(g_mod[i].name, base)) return &g_mod[i];
+    /* Tolerate a missing ".dll", which LoadLibrary also appends. */
+    char withext[64];
+    snprintf(withext, sizeof withext, "%s.dll", base);
+    for (unsigned i = 0; i < g_mod_n; ++i)
+        if (!strcmp(g_mod[i].name, withext)) return &g_mod[i];
+    return NULL;
+}
+
+static module_rec *mod_by_handle(uint32_t h) {
+    modules_init();
+    for (unsigned i = 0; i < g_mod_n; ++i)
+        if (g_mod[i].handle == h) return &g_mod[i];
+    return NULL;
+}
+
+/* Read a guest string. `wide` selects UTF-16 (Win32 W entry points). */
+static void guest_str(uint32_t va, int wide, char *out, size_t n) {
+    size_t i = 0;
+    out[0] = 0;
+    if (!va || !isaac_is_guest_va(va)) return;
+    for (; i + 1 < n; ++i) {
+        uint32_t c = wide ? isaac_r16(va + 2u * i) : isaac_r8(va + i);
+        if (!c) break;
+        out[i] = (c < 0x80) ? (char)c : '?';
+    }
+    out[i] = 0;
+}
+
+static uint32_t resolve_module(uint32_t name_va, int wide, const char *api,
+                               uint32_t caller) {
+    if (!name_va) {                       /* NULL asks for the running image */
+        modules_init();
+        return ISAAC_IMAGE_BASE;
+    }
+    char name[64];
+    guest_str(name_va, wide, name, sizeof name);
+    /* Win32: an EMPTY lpModuleName means "the calling module" (same as NULL
+     * for GetModuleHandleExW). The game asks for the EXE's own handle this
+     * way during Steam/breakpad setup; answering NULL sends it to exit(1). */
+    if (!name[0] && name_va)
+        return ISAAC_IMAGE_BASE;
+    module_rec *m = mod_by_name(name);
+    if (m) {
+        ++m->refs;
+        return m->handle;
+    }
+    /* Not present. This is frequently the CORRECT answer and the caller knows
+     * it: api-set probes and GLFW backend probes both handle NULL. Recorded
+     * rather than shouted. */
+    record_miss("module not present: %s", name, NULL);
+    isaac_log("[isaac][mod] %s(\"%s\") -> NULL  (caller 0x%08x)  "
+              "not one of the %u modules this build has",
+              api, name, caller, g_mod_n);
+    return 0;
+}
+
+/* ------------------------------------------------------------ exports ---- */
+
+void imp_kernel32__GetModuleHandleW(CpuState *restrict cpu) {
+    cpu->EAX = resolve_module(isaac_arg(cpu, 0), 1, "GetModuleHandleW",
+                              isaac_retaddr(cpu));
+}
+
+void imp_kernel32__GetModuleHandleA(CpuState *restrict cpu) {
+    cpu->EAX = resolve_module(isaac_arg(cpu, 0), 0, "GetModuleHandleA",
+                              isaac_retaddr(cpu));
+}
+
+/* BOOL GetModuleHandleExW(DWORD flags, LPCWSTR name, HMODULE *out) */
+void imp_kernel32__GetModuleHandleExW(CpuState *restrict cpu) {
+    uint32_t name = isaac_arg(cpu, 1), out = isaac_arg(cpu, 2);
+    uint32_t h = resolve_module(name, 1, "GetModuleHandleExW",
+                                isaac_retaddr(cpu));
+    if (out && isaac_is_guest_va(out)) isaac_w32(out, h);
+    cpu->EAX = h ? 1 : 0;
+}
+
+void imp_kernel32__LoadLibraryA(CpuState *restrict cpu) {
+    cpu->EAX = resolve_module(isaac_arg(cpu, 0), 0, "LoadLibraryA",
+                              isaac_retaddr(cpu));
+}
+
+void imp_kernel32__FreeLibrary(CpuState *restrict cpu) {
+    module_rec *m = mod_by_handle(isaac_arg(cpu, 0));
+    if (m && m->refs) --m->refs;
+    cpu->EAX = 1;
+}
+
+/* FARPROC GetProcAddress(HMODULE, LPCSTR name)
+ *
+ * Returns the SAME token the IAT holds for that symbol, so a dynamically
+ * resolved pointer and a statically bound one are indistinguishable and both
+ * dispatch through isaac_indirect_call with the correct measured purge. */
+void imp_kernel32__GetProcAddress(CpuState *restrict cpu) {
+    uint32_t h = isaac_arg(cpu, 0), name_va = isaac_arg(cpu, 1);
+    uint32_t caller = isaac_retaddr(cpu);
+    char name[96];
+
+    if (name_va && (name_va & 0xFFFF0000u) == 0) {
+        /* Ordinal import (the high word is zero). The census measured 0
+         * ordinal-only imports, so we have no name to match against. */
+        isaac_log("[isaac][mod] GetProcAddress by ORDINAL %u (caller 0x%08x) -- "
+                  "this image has no ordinal-only imports, so there is nothing "
+                  "to resolve it against.", name_va, caller);
+        record_miss("ordinal lookup: %s", "(by ordinal)", NULL);
+        cpu->EAX = 0;
+        return;
+    }
+    guest_str(name_va, 0, name, sizeof name);
+
+    module_rec *m = mod_by_handle(h);
+    if (!m) {
+        isaac_log("[isaac][mod] GetProcAddress(0x%08x, \"%s\"): unknown module "
+                  "handle (caller 0x%08x)", h, name, caller);
+        record_miss("unknown module handle for symbol: %s", name, NULL);
+        cpu->EAX = 0;
+        return;
+    }
+
+    /* Match within that module only: two DLLs can export the same name. */
+    for (unsigned i = 0; i < isaac_import_count; ++i) {
+        isaac_import *imp = &isaac_imports[i];
+        if (strcmp(imp->symbol, name)) continue;
+        char canon[48];
+        lower_copy(canon, sizeof canon, imp->dll);
+        if (!m->is_exe && strcmp(canon, m->name)) continue;
+        cpu->EAX = imp->shim_va;
+        return;
+    }
+
+    /* Not one of ours. Callers probe for optional APIs on purpose, so this is
+     * recorded rather than shouted -- isaac_module_report() lists them all. */
+    record_miss("%s!%s not provided", m->name, name);
+    cpu->EAX = 0;
+}
+
+/* ------------------------------------------------------ kernel objects --- */
+
+#define OBJ_EVENT 1
+#define OBJ_THREAD 2
+#define MAX_OBJECTS 64
+
+typedef struct {
+    int      type;
+    int      in_use;
+    int      manual_reset;
+    int      signaled;
+    char     name[48];
+} kobject;
+
+static kobject g_obj[MAX_OBJECTS];
+
+static uint32_t obj_alloc(int type) {
+    for (unsigned i = 0; i < MAX_OBJECTS; ++i) {
+        if (g_obj[i].in_use) continue;
+        memset(&g_obj[i], 0, sizeof g_obj[i]);
+        g_obj[i].in_use = 1;
+        g_obj[i].type = type;
+        return ISAAC_HANDLE_BASE + i * ISAAC_HANDLE_STRIDE;
+    }
+    return 0;
+}
+
+static kobject *obj_of(uint32_t h) {
+    if (h < ISAAC_HANDLE_BASE) return NULL;
+    uint32_t i = (h - ISAAC_HANDLE_BASE) / ISAAC_HANDLE_STRIDE;
+    if (i >= MAX_OBJECTS || !g_obj[i].in_use) return NULL;
+    if (ISAAC_HANDLE_BASE + i * ISAAC_HANDLE_STRIDE != h) return NULL;
+    return &g_obj[i];
+}
+
+/* HANDLE CreateEventW(SECURITY_ATTRIBUTES*, BOOL manual, BOOL initial, LPCWSTR)
+ *
+ * MUST return non-NULL: FUN_00aef191 uses this as its fallback when the
+ * condition-variable API is absent, and a NULL here reaches the same fatal
+ * branch one step later. */
+void imp_kernel32__CreateEventW(CpuState *restrict cpu) {
+    uint32_t manual = isaac_arg(cpu, 1), initial = isaac_arg(cpu, 2);
+    uint32_t name_va = isaac_arg(cpu, 3);
+    uint32_t h = obj_alloc(OBJ_EVENT);
+    if (!h) {
+        isaac_log("[isaac][k32] CreateEventW: object table full (%d)",
+                  MAX_OBJECTS);
+        cpu->EAX = 0;
+        return;
+    }
+    kobject *o = obj_of(h);
+    o->manual_reset = (int)manual;
+    o->signaled = (int)initial;
+    guest_str(name_va, 1, o->name, sizeof o->name);
+    cpu->EAX = h;
+}
+
+void imp_kernel32__SetEvent(CpuState *restrict cpu) {
+    kobject *o = obj_of(isaac_arg(cpu, 0));
+    if (o) o->signaled = 1;
+    cpu->EAX = o ? 1 : 0;
+}
+
+void imp_kernel32__ResetEvent(CpuState *restrict cpu) {
+    kobject *o = obj_of(isaac_arg(cpu, 0));
+    if (o) o->signaled = 0;
+    cpu->EAX = o ? 1 : 0;
+}
+
+void isaac_threads_run_pending(CpuState *restrict cpu);   /* below: cooperative threads */
+void isaac_threads_yield(void);                            /* below: per-frame slices (round 24) */
+#define WAIT_OBJECT_0  0x00000000u
+#define WAIT_TIMEOUT   0x00000102u
+#define WAIT_FAILED    0xFFFFFFFFu
+#define INFINITE       0xFFFFFFFFu
+
+/* DWORD WaitForSingleObject(HANDLE, DWORD ms)
+ *
+ * Single-threaded, so nothing can signal an event while we are blocked in it.
+ * A signalled object returns immediately; a zero timeout times out; an
+ * INFINITE wait on an unsignalled object is a GUARANTEED deadlock and is
+ * reported as one rather than hanging the tab. */
+void imp_kernel32__WaitForSingleObject(CpuState *restrict cpu) {
+    uint32_t h = isaac_arg(cpu, 0), ms = isaac_arg(cpu, 1);
+    isaac_threads_run_pending(cpu);          /* a yield point (ISAAC_RUN_THREADS) */
+    kobject *o = obj_of(h);
+    if (!o) { cpu->EAX = WAIT_FAILED; return; }
+    if (o->type == OBJ_THREAD) {
+        extern int isaac_threads_join(uint32_t h, CpuState *restrict cpu);
+        isaac_threads_join(h, cpu);          /* round 24f: a wait on a thread is a join */
+    }
+    if (o->signaled) {
+        if (!o->manual_reset) o->signaled = 0;   /* auto-reset consumes it */
+        cpu->EAX = WAIT_OBJECT_0;
+        return;
+    }
+    if (ms == 0) { cpu->EAX = WAIT_TIMEOUT; return; }
+    /* A sliced job that would block here yields; its next slice re-enters
+     * from the top and tests the object again (round 24d: yielding before
+     * the signalled test made a queue that waits on its own event never
+     * pop -- the event stayed set and every slice yielded on it). */
+    isaac_threads_yield();
+    isaac_log("[isaac][k32] WaitForSingleObject(0x%08x, %s) on an unsignalled "
+              "event from 0x%08x. This build is single-threaded, so nothing "
+              "can ever signal it -- this would hang the tab forever.",
+              h, ms == INFINITE ? "INFINITE" : "timeout", isaac_retaddr(cpu));
+    isaac_shutdown("blocking wait that can never be satisfied");
+    cpu->EAX = WAIT_FAILED;
+}
+
+/* Std handles are distinct tokens so CloseHandle and WriteConsoleA can tell
+ * them apart from events. */
+#define STD_INPUT_HANDLE  ((uint32_t)-10)
+#define STD_OUTPUT_HANDLE ((uint32_t)-11)
+#define STD_ERROR_HANDLE  ((uint32_t)-12)
+#define STDH_BASE (ISAAC_HANDLE_BASE + MAX_OBJECTS * ISAAC_HANDLE_STRIDE)
+
+void imp_kernel32__GetStdHandle(CpuState *restrict cpu) {
+    uint32_t which = isaac_arg(cpu, 0);
+    switch (which) {
+    case STD_INPUT_HANDLE:  cpu->EAX = STDH_BASE + 0; break;
+    case STD_OUTPUT_HANDLE: cpu->EAX = STDH_BASE + 4; break;
+    case STD_ERROR_HANDLE:  cpu->EAX = STDH_BASE + 8; break;
+    default:                cpu->EAX = 0; break;
+    }
+}
+
+/* BOOL WriteConsoleA(HANDLE, const void *buf, DWORD n, DWORD *written, void *) */
+void imp_kernel32__WriteConsoleA(CpuState *restrict cpu) {
+    uint32_t buf = isaac_arg(cpu, 1), n = isaac_arg(cpu, 2);
+    uint32_t written = isaac_arg(cpu, 3);
+    char tmp[512];
+    uint32_t k = 0;
+    if (buf && isaac_is_guest_va(buf)) {
+        for (; k < n && k + 1 < sizeof tmp; ++k) tmp[k] = (char)isaac_r8(buf + k);
+    }
+    tmp[k] = 0;
+    if (k) isaac_log("[isaac][con] %s", tmp);
+    if (written && isaac_is_guest_va(written)) isaac_w32(written, n);
+    cpu->EAX = 1;
+}
+
+void imp_kernel32__CloseHandle(CpuState *restrict cpu) {
+    kobject *o = obj_of(isaac_arg(cpu, 0));
+    if (o) o->in_use = 0;
+    cpu->EAX = 1;
+}
+
+/* uintptr_t _beginthreadex(void *security, unsigned stack_size,
+ *                          unsigned (__stdcall *start)(void *),
+ *                          void *arglist, unsigned initflag,
+ *                          unsigned *thrdaddr) -- cdecl (caller cleans; the
+ * call site at 0x00a5a663 does add esp,0x1c).
+ *
+ * Single-threaded port: the worker is ADOPTED but never runs. The object is
+ * born SIGNALLED so a later WaitForSingleObject on the handle resolves
+ * immediately instead of tripping the deadlock detector, and CloseHandle
+ * frees it like any kernel object. The one measured call site is the SFX
+ * engine's mixer-thread spawn (start = 0x00a7f130), so the game runs silent;
+ * the arglist block is guest state that no thread ever touches, so no fake
+ * thread stack or context is needed. */
+/* BOOL SetThreadPriority(HANDLE hThread, int nPriority) -- stdcall.
+ *
+ * The SFX engine's thread-spawn wrapper (0x00a5a570) RETURNS this call's
+ * result (0x00a5a6cc test eax,eax / setne al) and the audio init gates the
+ * whole engine on it (0x00a7d46c jne -- "Failed to start up OpenAL
+ * processing thread"). The generic STUB answers 0, which flips the gate:
+ * a strong answer of TRUE (1) is required, not just non-aborting. */
+void imp_kernel32__SetThreadPriority(CpuState *restrict cpu) {
+    (void)isaac_arg(cpu, 0); (void)isaac_arg(cpu, 1);
+    cpu->EAX = 1;
+}
+
+/* Guest threads as per-frame slices (round 24; the round-12 inline runner is
+ * kept behind ISAAC_RUN_THREADS=1 for comparison).
+ *
+ * Every spawn goes through the engine's trampoline 0x00a7f130 with a 12-byte
+ * block {fn, arg, thread-struct}: it calls fn(arg) once, then marks the struct
+ * done (+0x1c/+0x20) and frees the block. All three jobs the game spawns are
+ * loops that never return -- the audio device watcher (0x00a7da80), a 100 ms
+ * poller (0x00a220c0) and the async job queue (0x00a9e950) that pops work off
+ * a ring and runs it, which is where sound loads go. Run inline they hang the
+ * boot; not run, everything queued behind them starves.
+ *
+ * So each adopted job gets one slice per presented frame: it is entered from
+ * the top on a scratch guest stack under a setjmp, and it yields (longjmp
+ * back here, abandoning the slice's frames) where a real thread would block:
+ * Sleep, WaitForSingleObject, and an EnterCriticalSection that re-acquires
+ * the same lock with no other host-boundary call in between -- the idle lap
+ * of a queue loop. Next frame it is entered from the top again, re-reads its
+ * own state and carries on. A job whose loop condition fails returns
+ * normally through the trampoline and is retired.
+ *
+ * ISAAC_THREADS=0 turns slicing off (the old behaviour: jobs adopted, marked
+ * done, never run). */
+#include <setjmp.h>
+#define THR_MAX 16
+static struct {
+    uint32_t start, arglist, fn, arg, handle;
+    uint32_t entry, entry_arg, tobj;      /* what a slice enters, and the Thread struct to mark done */
+    int ran, retired;
+    unsigned slices, yields;
+} g_thr[THR_MAX];
+static unsigned g_thr_n;
+static int g_thr_running;                 /* the round-12 inline runner */
+static jmp_buf g_slice_jmp;
+static int g_slicing;
+static unsigned g_slice_cur;
+static uint32_t g_slice_cs_last;
+static unsigned g_slice_cs_repeat;
+static unsigned g_slice_frames;
+
+static int thr_mode(void) {               /* 1 = the inline runner (ISAAC_RUN_THREADS=1) */
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("ISAAC_RUN_THREADS"); v = (e && *e && *e != '0'); }
+    return v;
+}
+static int slice_mode(void) {             /* 1 = slices (default), 0 = ISAAC_THREADS=0 */
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("ISAAC_THREADS");
+        v = !(e && *e && *e == '0');
+        if (thr_mode()) v = 0;            /* the inline runner and slices are exclusive */
+    }
+    return v;
+}
+
+int isaac_threads_slicing(void) { return g_slicing; }
+
+/* Abandon the current slice. Only meaningful inside one; elsewhere a no-op,
+ * so the yield sites need no guard of their own. */
+void isaac_threads_yield(void) {
+    if (g_slicing) {
+        ++g_thr[g_slice_cur].yields;
+        longjmp(g_slice_jmp, 1);
+    }
+}
+
+/* Any host-boundary call other than the critical-section pair counts as
+ * progress: it breaks the "same lock twice, nothing between" idle pattern. */
+void isaac_threads_progress(void) {
+    if (g_slicing) { g_slice_cs_last = 0u; g_slice_cs_repeat = 0u; }
+}
+
+/* EnterCriticalSection reports every acquire here. The idle lap of a queue
+ * loop is: lock, see nothing queued, unlock, lock again. Two consecutive
+ * acquires of one lock with no progress between them is that lap. */
+void isaac_threads_note_cs(uint32_t cs) {
+    if (!g_slicing) return;
+    if (cs == g_slice_cs_last) {
+        if (++g_slice_cs_repeat >= 2u) isaac_threads_yield();
+    } else {
+        g_slice_cs_last = cs;
+        g_slice_cs_repeat = 0u;
+    }
+}
+
+/* The round-12 inline runner: run every pending job to completion at a yield
+ * point. Kept for ISAAC_RUN_THREADS=1; off otherwise. */
+void isaac_threads_run_pending(CpuState *restrict cpu) {
+    if (!thr_mode() || g_thr_running) return;
+    g_thr_running = 1;
+    for (unsigned i = 0; i < g_thr_n; ++i) {
+        if (g_thr[i].ran) continue;
+        g_thr[i].ran = 1;
+        CpuState sub = *cpu;
+        sub.ESP = (cpu->ESP - 0x2000u) & ~0xFu;
+        sub.ESP -= 4; isaac_w32(sub.ESP, g_thr[i].arglist);   /* the trampoline's arg */
+        sub.ESP -= 4; isaac_w32(sub.ESP, 0);                  /* return address */
+        isaac_log("[isaac][thr] running adopted thread #%u inline: trampoline 0x%08x "
+                  "-> job 0x%08x(0x%08x)", i, g_thr[i].start, g_thr[i].fn, g_thr[i].arg);
+        isaac_guest_call(g_thr[i].start, &sub);
+        isaac_log("[isaac][thr] adopted thread #%u finished (eax=0x%08x)", i, sub.EAX);
+    }
+    g_thr_running = 0;
+}
+
+/* One slice of job i: enter its loop function on a scratch stack under a
+ * setjmp; it either yields (longjmp back here) or returns (retired). */
+static void slice_job(unsigned i, CpuState *restrict cpu) {
+    extern void isaac_guest_jmp_save(void *dst);
+    extern void isaac_guest_jmp_restore(const void *src);
+    extern uint32_t recomp_jmp_pending;
+    extern uint32_t g_reentry_eip;
+    extern struct CpuState *recomp_last_cpu;
+    {
+        jmp_buf guest_saved;
+        isaac_guest_jmp_save(guest_saved);
+        /* Enter the LOOP function with its long-lived object, not the
+         * trampoline: the engine's job wrapper 0x00a5a760 reads {obj, fn,
+         * arg} out of a 12-byte block and frees it before calling fn(arg),
+         * so a second entry through it finds fn == 0 (round 24b: "indirect
+         * call to 0x00000000 from 0x00a5a787"). The loop function's argument
+         * is the manager object itself, which lives for the whole run. */
+        CpuState sub = *cpu;
+        sub.ESP = (cpu->ESP - 0x4000u) & ~0xFu;
+        sub.ECX = g_thr[i].entry_arg;                         /* the theora worker reads its object from ecx */
+        sub.ESP -= 4; isaac_w32(sub.ESP, g_thr[i].entry_arg); /* cdecl / stdcall(LPVOID) parameter */
+        sub.ESP -= 4; isaac_w32(sub.ESP, 0);                  /* return address */
+        g_slicing = 1;
+        g_slice_cur = i;
+        g_slice_cs_last = 0u;
+        g_slice_cs_repeat = 0u;
+        if (g_thr[i].slices == 0u)
+            isaac_log("[isaac][thr] job #%u 0x%08x(0x%08x) runs as one slice per frame "
+                      "(yields at Sleep / Wait / an idle lock lap)", i, g_thr[i].entry, g_thr[i].entry_arg);
+        ++g_thr[i].slices;
+        if (setjmp(g_slice_jmp) == 0) {
+            isaac_guest_call(g_thr[i].entry, &sub);
+            g_thr[i].retired = 1;
+            /* what the trampoline would have done after fn returned: the
+             * Thread struct's done flag, which its destructor tests */
+            if (g_thr[i].tobj && isaac_is_guest_va(g_thr[i].tobj + 0x20u))
+                *(uint8_t *)isaac_g(g_thr[i].tobj + 0x20u) = 1;
+            isaac_log("[isaac][thr] job #%u returned after %u slice(s): retired (eax=0x%08x)",
+                      i, g_thr[i].slices, sub.EAX);
+        }
+        /* yielded or returned: the slice's frames are gone, so is any state
+         * they left behind in the runtime */
+        g_slicing = 0;
+        recomp_jmp_pending = 0u;
+        g_reentry_eip = 0u;
+        recomp_last_cpu = (struct CpuState *)cpu;
+        isaac_guest_jmp_restore(guest_saved);
+    }
+}
+
+/* One slice of every live job. Called once per presented frame by the
+ * SwapBuffers shim; never re-entered (a job cannot present a frame). */
+void isaac_threads_slice(CpuState *restrict cpu) {
+    if (!slice_mode() || g_slicing || !cpu) return;
+    ++g_slice_frames;
+    for (unsigned i = 0; i < g_thr_n; ++i) {
+        if (g_thr[i].retired) continue;
+        slice_job(i, cpu);
+    }
+}
+
+/* Round 24f: a wait on a thread HANDLE is a join. The game stops a thread
+ * by setting its stop bit and waiting on the handle, and its Thread
+ * destructor then tests the done flag [obj+0x20] and calls std::terminate
+ * if the thread is still joinable (0x00a5a700 -> 0x00a7f1e0). The handle
+ * was signalled at creation, so the wait returned at once with the job
+ * never having seen its stop bit -- an abort at every shutdown once the
+ * jobs were sliced. Now the join runs the job's slices until its loop
+ * returns; a loop that ignores its stop bit is reported and the done flag
+ * is forced so the destructor does not terminate the process. */
+int isaac_threads_join(uint32_t h, CpuState *restrict cpu) {
+    unsigned i, n, cap;
+    if (!slice_mode() || g_slicing || !cpu) return 0;
+    for (i = 0; i < g_thr_n; ++i) if (g_thr[i].handle == h) break;
+    if (i == g_thr_n || g_thr[i].retired) return 0;
+    {
+        const char *e = getenv("ISAAC_JOIN_SLICES");
+        cap = (e && *e) ? (unsigned)strtoul(e, NULL, 10) : 4096u;
+    }
+    for (n = 0; n < cap && !g_thr[i].retired; ++n) slice_job(i, cpu);
+    if (g_thr[i].retired) {
+        isaac_log("[isaac][thr] join of job #%u 0x%08x(0x%08x): returned after %u slice(s)",
+                  i, g_thr[i].entry, g_thr[i].entry_arg, n);
+    } else {
+        isaac_log("[isaac][thr] join of job #%u 0x%08x(0x%08x): still looping after %u slice(s) "
+                  "-- its stop bit was not honoured; done flag forced",
+                  i, g_thr[i].entry, g_thr[i].entry_arg, n);
+        g_thr[i].retired = 1;
+        if (g_thr[i].tobj && isaac_is_guest_va(g_thr[i].tobj + 0x20u))
+            *(uint8_t *)isaac_g(g_thr[i].tobj + 0x20u) = 1;
+    }
+    return 1;
+}
+
+void isaac_threads_report(void) {
+    if (!g_thr_n) return;
+    isaac_log("[isaac][thr] %u job(s) adopted, %u frame(s) sliced:", g_thr_n, g_slice_frames);
+    for (unsigned i = 0; i < g_thr_n; ++i)
+        isaac_log("[isaac][thr]   #%u 0x%08x(0x%08x): %u slice(s), %u yield(s)%s",
+                  i, g_thr[i].fn, g_thr[i].arg, g_thr[i].slices, g_thr[i].yields,
+                  g_thr[i].retired ? ", retired" : "");
+}
+
+void imp_api_ms_win_crt_runtime___beginthreadex(CpuState *restrict cpu) {
+    uint32_t start = isaac_arg(cpu, 2), arglist = isaac_arg(cpu, 3),
+             thrdaddr = isaac_arg(cpu, 5);
+    uint32_t h = obj_alloc(OBJ_THREAD);
+    if (!h) { cpu->EAX = 0; return; }
+    obj_of(h)->signaled = 1;
+    if (thrdaddr && isaac_is_guest_va(thrdaddr)) isaac_w32(thrdaddr, 0x1788u);
+    uint32_t fn = 0, arg = 0, fn2 = 0, arg2 = 0;
+    if (isaac_is_guest_va(arglist + 11u)) { fn = isaac_r32(arglist); arg = isaac_r32(arglist + 4u); }
+    /* the engine wraps once more: job 0x00a5a760(block) -> block = {obj, fn, arg}
+     * sets obj's running bit around fn(arg) */
+    if (fn == 0x00a5a760u && isaac_is_guest_va(arg + 11u)) { fn2 = isaac_r32(arg + 4u); arg2 = isaac_r32(arg + 8u); }
+    isaac_log("[isaac][thr] _beginthreadex(fn=0x%08x, arg=0x%08x -> job 0x%08x(0x%08x) -> 0x%08x(0x%08x)) -> handle "
+              "0x%08x (adopted; %s)", start, arglist, fn, arg, fn2, arg2, h,
+              slice_mode() ? "one slice per frame" :
+              thr_mode() ? "runs inline at the next yield point" : "does not run: ISAAC_THREADS=0");
+    /* The audio device watcher's object is also what the ALC_SOFT event is
+     * delivered to (round 22): register it whether or not it is sliced. */
+    if (fn2 == 0x00a7da80u && arg2) {
+        extern void isaac_audio_pump_register(uint32_t this_va);
+        isaac_audio_pump_register(arg2);
+    }
+    /* The engine's Thread wrapper tests the thread struct's done flag
+     * (+0x20, set by the trampoline 0x00a7f130 when fn returns) in its
+     * destructor: still-running -> std::terminate() (boot round 12). A thread
+     * that never runs is, for the program, a thread that ran and exited at
+     * once: mark it done at adoption when nothing will run it. Sliced jobs
+     * run the trampoline themselves and it sets the flag when they retire. */
+    if (!slice_mode() && !thr_mode() && start == 0x00a7f130u && isaac_is_guest_va(arglist + 11u)) {
+        uint32_t tobj = isaac_r32(arglist + 8u);
+        if (tobj && isaac_is_guest_va(tobj + 0x20u)) *(uint8_t *)isaac_g(tobj + 0x20u) = 1;
+    }
+    if (g_thr_n < THR_MAX) {
+        g_thr[g_thr_n].start = start; g_thr[g_thr_n].arglist = arglist;
+        g_thr[g_thr_n].fn = fn; g_thr[g_thr_n].arg = arg; g_thr[g_thr_n].handle = h;
+        g_thr[g_thr_n].entry = fn2 ? fn2 : fn;
+        g_thr[g_thr_n].entry_arg = fn2 ? arg2 : arg;
+        g_thr[g_thr_n].tobj = (start == 0x00a7f130u && isaac_is_guest_va(arglist + 11u)) ? isaac_r32(arglist + 8u) : 0u;
+        g_thr[g_thr_n].ran = 0; g_thr[g_thr_n].retired = 0;
+        g_thr[g_thr_n].slices = 0; g_thr[g_thr_n].yields = 0;
+        ++g_thr_n;
+    }
+    cpu->EAX = h;
+}
+
+/* ---- critical sections ---------------------------------------------------
+ * Single-threaded, so the section itself is inert: nothing can contend it.
+ * They were STUB rows (65.9 M stub-record updates in a ten-minute run);
+ * real bodies are cheaper, and Enter is where a sliced job's idle lap is
+ * detected. The 24-byte Win32 CRITICAL_SECTION is zeroed on init; the game's
+ * own Mutex keeps its "locked" byte just past it and never reads ours. */
+void imp_kernel32__InitializeCriticalSection(CpuState *restrict cpu) {
+    uint32_t cs = isaac_arg(cpu, 0);
+    if (cs && isaac_is_guest_va(cs + 23u)) memset(isaac_g(cs), 0, 24);
+    cpu->EAX = 0;
+}
+void imp_kernel32__EnterCriticalSection(CpuState *restrict cpu) {
+    isaac_threads_note_cs(isaac_arg(cpu, 0));
+    cpu->EAX = 0;
+}
+void imp_kernel32__LeaveCriticalSection(CpuState *restrict cpu) { cpu->EAX = 0; }
+void imp_kernel32__TryEnterCriticalSection(CpuState *restrict cpu) { cpu->EAX = 1; }
+void imp_kernel32__DeleteCriticalSection(CpuState *restrict cpu) { cpu->EAX = 0; }
+
+/* HANDLE CreateThread(sec, stack, start, param, flags, &id) -- stdcall, 24.
+ * The one caller is the theoraplayer worker (FUN_00a8b570 spawns
+ * FUN_00aab120 with its worker object), which decodes cutscene video. It was
+ * an inert stub: a NULL handle, no thread, no video. It is adopted here like
+ * a _beginthreadex job -- entered directly with its parameter, one slice per
+ * frame (round 24c). */
+void imp_kernel32__CreateThread(CpuState *restrict cpu) {
+    uint32_t start = isaac_arg(cpu, 2), param = isaac_arg(cpu, 3), idp = isaac_arg(cpu, 5);
+    uint32_t h = obj_alloc(OBJ_THREAD);
+    if (!h) { cpu->EAX = 0; return; }
+    obj_of(h)->signaled = 1;
+    if (idp && isaac_is_guest_va(idp + 3u)) isaac_w32(idp, 0x1789u + g_thr_n);
+    isaac_log("[isaac][thr] CreateThread(start=0x%08x, param=0x%08x) -> handle 0x%08x (adopted; %s)",
+              start, param, h, slice_mode() ? "one slice per frame" : "does not run: ISAAC_THREADS=0");
+    if (g_thr_n < THR_MAX) {
+        g_thr[g_thr_n].start = start; g_thr[g_thr_n].arglist = param;
+        g_thr[g_thr_n].fn = start; g_thr[g_thr_n].arg = param; g_thr[g_thr_n].handle = h;
+        g_thr[g_thr_n].entry = start; g_thr[g_thr_n].entry_arg = param; g_thr[g_thr_n].tobj = 0u;
+        g_thr[g_thr_n].ran = 0; g_thr[g_thr_n].retired = 0;
+        g_thr[g_thr_n].slices = 0; g_thr[g_thr_n].yields = 0;
+        ++g_thr_n;
+    }
+    cpu->EAX = h;
+}
+
+/* ------------------------------------------------------------- report ---- */
+
+void isaac_module_report(void) {
+    modules_init();
+    isaac_log("[isaac][mod] ---- module / symbol resolution report ----");
+    isaac_log("[isaac][mod]   %u modules resolvable", g_mod_n);
+    if (!g_miss_n) {
+        isaac_log("[isaac][mod]   nothing resolved to NULL");
+        return;
+    }
+    isaac_log("[isaac][mod]   %u distinct NULL results (each may be a "
+              "deliberate probe the caller handles, or a real gap):", g_miss_n);
+    for (unsigned i = 0; i < g_miss_n; ++i)
+        isaac_log("[isaac][mod]     %6u x  %s", g_miss[i].hits, g_miss[i].what);
+}
+
+/* HRESULT CoInitializeEx(LPVOID pvReserved, DWORD dwCoInit) -- ole32 stdcall.
+ * The game retries on RPC_E_CHANGED_MODE (0x80010106); we are single-threaded
+ * with no COM state, so S_OK is the honest benign answer for both calls. */
+void imp_ole32__CoInitializeEx(CpuState *restrict cpu) {
+    (void)isaac_arg(cpu, 0); (void)isaac_arg(cpu, 1);
+    fprintf(stderr, "[com] CoInitializeEx: edi=%08x esi=%08x esp=%08x "
+                    "[0xdfeb940]=%08x [0xdfeb944]=%08x [0xdfeb948]=%08x "
+                    "[0xdfeb94c]=%08x [0xdfeb950]=%08x [0xdfeb954]=%08x\n",
+            (unsigned)cpu->EDI, (unsigned)cpu->ESI, (unsigned)cpu->ESP,
+            (unsigned)isaac_r32(0x0dfeb940u), (unsigned)isaac_r32(0x0dfeb944u),
+            (unsigned)isaac_r32(0x0dfeb948u), (unsigned)isaac_r32(0x0dfeb94cu),
+            (unsigned)isaac_r32(0x0dfeb950u), (unsigned)isaac_r32(0x0dfeb954u));
+    cpu->EAX = 0;   /* S_OK */
+}

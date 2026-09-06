@@ -1,0 +1,11 @@
+{
+  "name": "browsing-of-isaac",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-concurrency=2 tests/*.test.js"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

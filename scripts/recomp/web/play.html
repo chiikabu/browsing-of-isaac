@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Isaac, recompiled</title>
+<style>
+  :root { --bg: #14110f; --panel: #211b17; --edge: #3a2f27; --ink: #e9dfcf; --dim: #a1937f; --accent: #e0a842; --bar: #7a5a2f; --err: #d24d3f; --ok: #79b36a; }
+  html, body { height: 100%; margin: 0; }
+  [hidden] { display: none !important; }   /* the page's own display rules must not outrank the hidden attribute */
+  body { background: #000; color: var(--ink); font: 14px/1.4 system-ui, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  button { font: inherit; color: var(--ink); background: #2c241f; border: 1px solid var(--edge); border-radius: 4px; padding: 4px 12px; cursor: pointer; }
+  button:hover { background: #3a2f28; }
+  button:disabled { opacity: .5; cursor: default; }
+  /* the game fills the viewport: the largest 16:9 box it allows, centred on black, nothing else on the page */
+  main { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #000; }
+  /* the canvas is 960x540 (the game's viewport) scaled to the largest 16:9 box the viewport allows, crisp */
+  #stage { position: relative; width: min(100vw, calc(100vh * 16 / 9)); aspect-ratio: 16 / 9; background: #000; }
+  #stage:fullscreen { display: flex; align-items: center; justify-content: center; background: #000; }
+  #canvas { display: block; width: 100%; height: 100%; background: #000; outline: none; image-rendering: pixelated; image-rendering: crisp-edges; }
+  #stage:fullscreen #canvas { width: min(100vw, calc(100vh * 16 / 9)); height: min(100vh, calc(100vw * 9 / 16)); }
+  /* the loader: one bar and one line over black, gone at the first frame */
+  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #000; }
+  #bar { width: min(260px, 60%); height: 3px; background: #2a2420; border-radius: 2px; overflow: hidden; }
+  #bar-fill { width: 0; height: 100%; background: var(--accent); transition: width .15s linear; }
+  #overlay .note { color: var(--dim); font-size: 12px; max-width: 44em; text-align: center; }
+  #stages { display: grid; grid-template-columns: max-content minmax(160px, 28vw) max-content; gap: 6px 12px; align-items: center; font-variant-numeric: tabular-nums; }
+  #stages .name { text-align: right; color: var(--dim); }
+  #stages .name.done { color: var(--ok); }
+  #stages .name.active { color: var(--ink); }
+  #stages progress { width: 100%; height: 10px; accent-color: var(--accent); }
+  #stages .bytes { font-size: 12px; color: var(--dim); min-width: 11em; text-align: left; }
+  #play { font-size: 24px; padding: 10px 44px; margin-top: 8px; background: var(--accent); color: #1b1410; border: 0; border-radius: 6px; font-weight: 700; letter-spacing: .1em; }
+  #play:hover { background: #f0b74e; }
+  #streaming { font-variant-numeric: tabular-nums; }
+  /* opt-in chrome: ?stats=1 shows the live status line, ?saves=1 the saves button */
+  #fps { position: fixed; left: 6px; top: 4px; z-index: 3; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; text-shadow: 0 0 3px #000; }
+  #saves-btn { position: fixed; right: 6px; top: 4px; z-index: 3; font-size: 12px; padding: 2px 8px; opacity: .7; }
+  #error { position: absolute; left: 4%; right: 4%; bottom: 4%; max-height: 60%; overflow: auto; background: rgba(33, 27, 23, .97); border: 1px solid var(--err); border-radius: 6px; padding: 10px 12px; box-sizing: border-box; }
+  #error h3 { margin: 0 0 6px; font-size: 14px; color: var(--err); }
+  #error.ended h3 { color: var(--ok); }
+  #error pre { margin: 6px 0 0; font: 11px/1.35 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-all; color: var(--dim); max-height: 34vh; overflow: auto; }
+  #error .row { display: flex; gap: 8px; margin-top: 8px; }
+  dialog { background: var(--panel); color: var(--ink); border: 1px solid var(--edge); border-radius: 8px; min-width: 22em; max-width: 90vw; }
+  dialog::backdrop { background: rgba(0, 0, 0, .6); }
+  dialog h3 { margin: 0 0 8px; }
+  dialog .row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  dialog table { border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; width: 100%; }
+  dialog td { padding: 2px 6px; border-bottom: 1px solid var(--edge); }
+  dialog td.n { text-align: right; }
+  dialog .note { color: var(--dim); font-size: 12px; }
+  #log { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <div id="stage">
+    <canvas id="canvas" width="960" height="540" tabindex="0"></canvas>
+    <div id="overlay">
+      <div id="bar"><div id="bar-fill"></div></div>
+      <div id="stages" hidden>
+        <span class="name" id="n-module">module</span><progress id="p-module" max="1" value="0"></progress><span class="bytes" id="b-module"></span>
+        <span class="name" id="n-image">memory image</span><progress id="p-image" max="1" value="0"></progress><span class="bytes" id="b-image"></span>
+        <span class="name" id="n-archives">archives</span><progress id="p-archives" max="1" value="0"></progress><span class="bytes" id="b-archives"></span>
+        <span class="name" id="n-boot">host boot</span><progress id="p-boot" max="1" value="0"></progress><span class="bytes" id="b-boot"></span>
+      </div>
+      <div id="status" class="note">loading&hellip;</div>
+      <button id="play" type="button" hidden>PLAY</button>
+      <div id="streaming" class="note" hidden></div>
+    </div>
+    <div id="error" hidden>
+      <h3 id="error-title">Something went wrong</h3>
+      <div id="error-text" class="note"></div>
+      <pre id="errlog"></pre>
+      <div class="row"><button id="reload-btn" type="button">Reload</button><button id="dismiss-btn" type="button">Dismiss</button></div>
+    </div>
+    <pre id="log">booting...</pre>
+  </div>
+</main>
+<div id="fps" hidden></div>
+<button id="saves-btn" type="button" hidden title="Export, import or reset the saves this browser keeps">Saves</button>
+<dialog id="saves">
+  <h3>Saves</h3>
+  <div class="note">Everything the game writes (persistentgamedata*.dat, options.ini, ...) is kept in this browser's IndexedDB and restored before the next boot.</div>
+  <table><tbody id="saves-list"></tbody></table>
+  <div class="row">
+    <button id="export-zip" type="button">Export .zip</button>
+    <button id="export-json" type="button">Export .json</button>
+    <button id="import-btn" type="button">Import&hellip;</button>
+    <input id="import-file" type="file" accept=".zip,.json,application/zip,application/json" hidden>
+    <button id="reset-saves" type="button">Reset</button>
+  </div>
+  <div id="saves-status" class="note"></div>
+  <div class="row"><button id="saves-reload" type="button" hidden>Reload to apply</button><button id="saves-close" type="button">Close</button></div>
+</dialog>
+<script type="module" src="./play.mjs"></script>
+</body>
+</html>
