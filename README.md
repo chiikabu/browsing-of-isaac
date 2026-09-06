@@ -1,4 +1,4 @@
-# browsing-of-isaac
+# the-browsing-of-isaac
 
 Static recompilation of *The Binding of Isaac: Repentance* (Windows x86) to
 WebAssembly. Ghidra p-code to C to Emscripten, linked against a host layer that
