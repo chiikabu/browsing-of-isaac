@@ -84,9 +84,10 @@ test('round 78: a host whose ranges lie does not start the reader Worker', () =>
 test('round 78: whole-chunk mode fetches every piece once and keeps them', () => {
   // 6 cached 19 MB pieces with FIFO eviction is the freeze: a new room misses,
   // downloads 19 MB on the engine's read, and drops a piece it will need again.
-  assert.match(portable, /if \(ranges && cache\.size > 6\) cache\.delete\(cache\.keys\(\)\.next\(\)\.value\);/);
   assert.match(portable, /async function prefetchAll\(\)/);
-  assert.match(portable, /if \(!ranges\) await prefetchAll\(\);/);
+  assert.match(portable, /await prefetchAll\(\);/);
+  assert.doesNotMatch(portable, /if \(cache\.size > 6\) cache\.delete/,
+    'dropping a 19 MB piece is the freeze; keep every chunk');
   assert.match(play, /onChunk = \(got, total\) => \{[\s\S]*?if \(portable && portable\.ready\)/,
     'the status hook is installed before ready waits on the prefetch');
 });

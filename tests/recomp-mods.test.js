@@ -1,4 +1,4 @@
-// recomp-mods.test.js -- mods imported from the device (round 74).
+﻿// recomp-mods.test.js -- mods imported from the device (round 74).
 //
 // The parts that are quiet when they break: a path out of an archive that lands
 // somewhere it should not, a mod that goes into the save store, a zip with the
@@ -247,4 +247,48 @@ test('round 78: the menu is not open until it has rows', () => {
   const body = open.slice(0, open.indexOf('};'));
   assert.ok(body.indexOf('await load()') < body.indexOf('st.open = true'), 'the art is loaded before it calls itself open');
   assert.ok(m.includes('if (!st.model) return true;'), 'and a key before the first draw is swallowed, not guessed at');
+});
+
+test('round 81: the MOD BROWSER row needs a catalogue the build carries', () => {
+  // The row is offered only when there is a base to fetch from, and a built page
+  // had no way to carry one: portable.py wrote no window.isaacModCatalogue and
+  // nothing put ?catalogue= in the URL. So the browser existed, worked, and was
+  // unreachable on every build for a round and a half.
+  const mods = readFileSync(join(root, 'scripts', 'recomp', 'web', 'mods.mjs'), 'utf8');
+  const play = readFileSync(join(root, 'scripts', 'recomp', 'web', 'play.mjs'), 'utf8');
+  assert.match(mods, /if \(o\.catalogueBase\) rows\.push\(\{ label: 'MOD BROWSER'/);
+  assert.match(play, /catalogueBase: params\.get\('catalogue'\) \|\| \(typeof window !== 'undefined' \? window\.isaacModCatalogue : null\) \|\| null,/);
+  const portable = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'portable.py'), 'utf8');
+  assert.match(portable, /def catalogue_script\(args\) -> str:/);
+  assert.match(portable, /window\.isaacModCatalogue = %s;/, 'the build writes the base into the page');
+  assert.match(portable, /p\.add_argument\("--catalogue"/);
+  // both shapes, because the single-file build has the same row
+  assert.equal((portable.match(/catalogue_script\(args\)/g) || []).length, 3,
+    'the definition and both call sites: the chunked page and the offline page');
+});
+
+test('round 81: the driver presses the keys a player would to reach the browser', () => {
+  // what was missing was not the code but a check that ever opened it
+  const drv = readFileSync(join(root, 'scripts', 'recomp', 'web', 'drive_mods.mjs'), 'utf8');
+  assert.match(drv, /const toRow = async \(label\) => \{/, 'the cursor is walked, not the action called');
+  assert.match(drv, /st2\.rows\.includes\('MOD BROWSER'\)/);
+  assert.match(drv, /page\.route\('\*\*\/catalogue\.invalid\/\*\*'/, 'the catalogue is served by the driver');
+  assert.match(drv, /'the two parts were joined back into the zip they came from'/);
+  // and the menu tells a driver what it is showing without handing over an action
+  const mods = readFileSync(join(root, 'scripts', 'recomp', 'web', 'mods.mjs'), 'utf8');
+  assert.match(mods, /rows: m\.rows\.map\(\(r\) => r\.label\)/);
+});
+
+test('round 81: unlocks are not gated on mods being off', () => {
+  // PersistentGameData::TryUnlock (0x00929a20) opens with `cmp byte [esi+1], 0 ;
+  // jne <exit>` and, once past it, its next act is the store that records the
+  // unlock -- so PGD+1, the readonly byte, IS the gate. The only thing that sets
+  // it is SetReadOnly (0x009299e0), which the game calls while mods are loaded.
+  // The patch reads that function's argument as false.
+  const patches = readFileSync(join(root, 'scripts', 'recomp', 'lift', 'lift_patches.py'), 'utf8');
+  assert.match(patches, /"0x009299e4",/, 'the block patch is registered');
+  assert.match(patches, /ub900_1 = \(\(uint8_t\)0x0u\);/, 'the argument is read as false');
+  assert.match(patches, /LIFT-PATCH 0x009299e4 \(round 81\)/, 'and carries its marker, which is what makes it idempotent');
+  // the old text has to be what the lifter actually emits, or the patch is a no-op
+  assert.match(patches, /ub900_1 = MEMR8\(u3300_4\);/, 'the text it replaces');
 });

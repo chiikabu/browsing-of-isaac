@@ -181,6 +181,18 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 81: the row nobody could reach, and the byte that stopped the unlocks** (§21.95).
+  Round 77b's mod browser shipped twice unreachable: the MOD BROWSER row is
+  offered only with a catalogue base and no build ever carried one.
+  `portable.py --catalogue URL` writes it in, and `drive_mods.mjs` now serves a
+  catalogue of its own and installs a two-part mod out of it -- the check whose
+  absence let it ship. **Achievements survive mods**: `TryUnlock`
+  (`0x00929a20`) gates on `PGD+1`, the readonly byte, and past it records the
+  unlock; the only writer is `SetReadOnly` (`0x009299e0`), which the game calls
+  while mods are loaded, so the block patch at `0x009299e4` reads its argument
+  as false. The FPS readout no longer survives a reload, the mods menu's key
+  hints are gone, and a menu closed with a new mod reloads the page, because the
+  engine scans `mods/` once before `main`.
 - **Round 80: a rebuild that does not invalidate the upload** (§21.94).
   The keystream seed was the two stream lengths, so adding page assets to part
   A re-scrambled part B too -- 559 MB of identical plaintext with different

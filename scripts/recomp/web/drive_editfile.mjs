@@ -77,10 +77,12 @@ try {
   await hold('Enter'); await sleep(400);
   st = await state();
   check(!st.open, 'BACK closes the menu', `open=${st.open}`);
-  // N flips the FPS readout (no menu entry, no setting in the store) and this browser remembers it
+  // N flips the FPS readout (no menu entry, no setting in the store). Round 81:
+  // for this visit only -- it used to be remembered in localStorage, so one press
+  // of a bare key left a readout over the game for good.
   await hold('KeyN'); await sleep(600);
   const fpsOn = await page.evaluate(() => ({ stored: localStorage.getItem('isaac-fps-viewer'), on: window.isaacEditFileMenu.fpsViewer() }));
-  check(fpsOn.on && fpsOn.stored === '1', 'N turns the FPS readout on and this browser remembers it', JSON.stringify(fpsOn));
+  check(fpsOn.on && fpsOn.stored === null, 'N turns the FPS readout on, and nothing remembers it', JSON.stringify(fpsOn));
   const noStore = await page.evaluate(async () => new Promise((resolve) => {
     const req = indexedDB.open('isaac-saves', 1);
     req.onerror = () => resolve('open failed');

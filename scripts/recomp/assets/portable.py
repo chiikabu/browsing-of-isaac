@@ -63,6 +63,20 @@ def keystream_key(seed: bytes) -> bytes:
     return bytes(out[:256])
 
 
+def catalogue_script(args) -> str:
+    """Round 81: where the mod browser looks.
+
+    `createModsMenu` offers the MOD BROWSER row only when it has a catalogue base,
+    which it takes from `?catalogue=` or from `window.isaacModCatalogue`. A built
+    page had neither, so the row was never there -- the browser worked and was
+    unreachable. `--catalogue` writes the second one in.
+    """
+    url = getattr(args, "catalogue", None)
+    if not url:
+        return ""
+    return "<script>window.isaacModCatalogue = %s;</script>\n" % json.dumps(url.rstrip("/"))
+
+
 def scramble(data: bytes, pos: int, key: bytes) -> bytes:
     """XOR `data`, which starts at `pos` in its stream. Reversible from any
     offset, which a range read needs."""
@@ -328,9 +342,6 @@ PROVIDER_JS = r"""
       ? new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer())
       : raw;
     cache.set(key, u);
-    // whole-chunk mode (jsDelivr): a 19 MB piece that is dropped is fetched
-    // again the next time a window lands in it, which is the freeze. Keep them.
-    if (ranges && cache.size > 6) cache.delete(cache.keys().next().value);
     return u;
   }
   async function ranged(p) {
@@ -443,7 +454,9 @@ PROVIDER_JS = r"""
     status: P.status,
     ready: (async function () {
       await probeRanges();
-      if (!ranges) await prefetchAll();
+      // Always pull every piece before the engine starts. jsDelivr's ranges
+      // lie, so a window is a 19 MB GET; doing that mid-room is the freeze.
+      await prefetchAll();
       return ranges;
     })(),
     ranges: function () { return ranges; },
@@ -586,6 +599,7 @@ def cmd_chunks(args) -> int:
     if os.path.isfile(trail):
         data["trail"] = json.loads(read(trail).decode("utf-8"))
     head = ('<script>window.__isaacPortableData = ' + json.dumps(data, separators=(",", ":")) + ';</script>\n'
+            + catalogue_script(args) +
             '<script>' + PROVIDER_JS + '</script>')
     mods = {rel: read(os.path.join(args.dist, rel)).decode("utf-8") for rel in MODULES}
     if not args.plain:
@@ -637,7 +651,7 @@ def cmd_offline(args) -> int:
             "index": index_for(args.dist, files), "manifest": manifest_for(args.dist, files),
             "status": "loading… (this page carries the game)"}
     parts = ['<script>window.__isaacPortableData = ' + json.dumps(data, separators=(",", ":")) + ';',
-             'window.__isaacPortableData.blobs = [];</script>\n']
+             'window.__isaacPortableData.blobs = [];</script>\n', catalogue_script(args)]
     state = {"budget": 0, "group": [], "groups": 0}
 
     def flush():
@@ -687,11 +701,15 @@ def main(argv=None) -> int:
     p.add_argument("--key-b64", help="scramble with this key instead of one derived from the sizes, so "
                                      "chunks that did not change keep the bytes already uploaded")
     p.add_argument("--key-of", help="take --key-b64 out of an earlier build's index.html")
+    p.add_argument("--catalogue", help="where modpack.py's catalogue is served from; without one the "
+                                       "page offers no MOD BROWSER row")
     p.set_defaults(fn=cmd_chunks)
     p = sub.add_parser("offline")
     p.add_argument("dist"); p.add_argument("out")
     p.add_argument("--piece-mib", type=int, default=8, help="inline piece size (the count costs nothing here)")
     p.add_argument("--skip", nargs="*", help="archive file names to leave out")
+    p.add_argument("--catalogue", help="where modpack.py's catalogue is served from; without one the "
+                                       "page offers no MOD BROWSER row")
     p.set_defaults(fn=cmd_offline)
     args = ap.parse_args(argv)
     if getattr(args, "key_of", None) and not args.key_b64:

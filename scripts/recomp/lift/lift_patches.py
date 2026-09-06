@@ -98,6 +98,10 @@ PATCHES: dict[int, tuple[str, str]] = {
 # function, its first block is re-decoded from 0xa2b5c8, and both targets
 # get a case in its re-entry switch.
 BLOCK_PATCHES: list[tuple[str, str, str]] = [
+    # Round 81: achievements keep unlocking with mods on (see the marker text).
+    ("0x009299e4",
+     '  RECOMP_VA(0x9299e4u);\n  u3300_4 = (uint32_t)(EBP + ((uint32_t)0x8u));\n  ub900_1 = MEMR8(u3300_4);\n',
+     '  RECOMP_VA(0x9299e4u);\n  /* LIFT-PATCH 0x009299e4 (round 81): PersistentGameData::SetReadOnly reads its\n     argument here and stores it at [this+1]. That byte is the whole achievement\n     gate: TryUnlock (0x00929a20) tests it first and returns, and past it the\n     next thing it does is record the unlock. The game sets it while mods are\n     loaded, which is why a modded run earns nothing. Read the argument as\n     false: the flag is recorded, the log line still says what happened, and\n     nothing else about the save changes. */\n  u3300_4 = (uint32_t)(EBP + ((uint32_t)0x8u));\n  ub900_1 = ((uint8_t)0x0u);\n'),
     # Round 52: the save-select screen's EDIT FILE menu (see the marker text).
     ("0x009d9d59",
      '  RECOMP_VA(0x9d9d59u);\n  u43f80_4 = ((uint32_t)0x0u);\n  ESP = (uint32_t)(ESP - ((uint32_t)0x4u));\n  MEMW32(ESP, u43f80_4);\n  RECOMP_VA(0x9d9d5bu);\n  u44180_4 = ((uint32_t)0xb7fb20u);\n  ESP = (uint32_t)(ESP - ((uint32_t)0x4u));\n  MEMW32(ESP, u44180_4);\n  RECOMP_VA(0x9d9d60u);\n  u5280_4 = ((uint32_t)0x2u);\n  MEMW32(EDI, u5280_4);\n',

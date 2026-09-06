@@ -88,6 +88,7 @@ function render() {
     renderQueued = false;
     for (const [name, s] of Object.entries(stages)) {
       const p = $(`p-${name}`), b = $(`b-${name}`), n = $(`n-${name}`);
+      if (!p || !b || !n) continue;
       if (s.unit === 'count' && !s.total) { p.hidden = n.hidden = b.hidden = true; continue; }
       if (s.unit === 'count') p.hidden = n.hidden = b.hidden = false;
       if (s.total) { p.max = s.total; p.value = s.done ? s.total : Math.min(s.received, s.total); }
@@ -166,6 +167,8 @@ hooks.noReader = !!(portable && !portable.urlFor);
 // the status line is the only progress that exists for that wait.
 if (portable && portable.chunks) {
   stages.chunks.total = portable.chunks;
+  const stagesEl = $('stages');
+  if (stagesEl) stagesEl.hidden = false;
   render();
   window.__isaacPortableData.onChunk = (got, total) => {
     stages.chunks.received = got;
@@ -178,7 +181,7 @@ if (portable && portable.chunks) {
 // a chunked build asks its host whether it does byte ranges before the first read:
 // without them a 1 MiB window would drag a whole chunk behind it
 if (portable && portable.ready) {
-  try { await portable.ready; } catch { /* fall back to whole chunks */ }
+  try { await portable.ready; } catch (e) { throw new Error(`portable chunks: ${e && e.message || e}`); }
   // round 78: a host whose byte ranges cannot be trusted (jsDelivr answers 206
   // with the wrong bytes) must not be asked for a range. The Worker is the
   // thing that sends Range, so it stays off and every window is a whole GET.
@@ -503,10 +506,12 @@ const OPTIONS_KEY = 'c:/isaac/documents/my games/binding of isaac repentance+/op
 const DEFAULT_OPTIONS = ['[Options]', 'Language=0', 'MusicVolume=0.7000', 'MusicEnabled=1',
   'SFXVolume=0.7000', 'MapOpacity=0.3000', 'Fullscreen=0', 'Filter=0', 'Exposure=1.0000',
   'Gamma=1.0000', 'ControllerHotplug=1', 'PopUps=1', 'CameraStyle=1', 'ShowRecentItems=0',
-    // EnableMods=0: a run with mods on earns no achievements until Mom is beaten,
-  // so a first visit does not get them on by our choice. TAB on the mods screen
-  // turns them on, which is what the sign there says.
-  'HudOffset=1.0000', 'TryImportSave=0', 'FoundHUD=0', 'EnableMods=0', 'RumbleEnabled=1',
+    // EnableMods: off in round 76 because a modded run earned no achievements
+  // until Mom was beaten, and that is not a trade to make on someone's behalf.
+  // Round 81 took the gate out of the engine (lift_patches 0x009299e4: the
+  // readonly byte TryUnlock tests is never set), so the reason is gone and mods
+  // are on. TAB on the mods screen still flips it either way.
+  'HudOffset=1.0000', 'TryImportSave=0', 'FoundHUD=0', 'EnableMods=1', 'RumbleEnabled=1',
   'ChargeBars=0', 'BulletVisibility=0', 'TouchMode=1', 'AimLock=1', 'JacobEsauControls=0',
   'AscentVoiceOver=1', 'OnlineHud=0', 'StreamerMode=0', 'OnlinePlayerVolume=6',
   'OnlinePlayerOpacity=10', 'OnlineChatEnabled=1', 'OnlineChatFilterEnabled=1',

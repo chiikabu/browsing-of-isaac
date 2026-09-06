@@ -153,7 +153,8 @@ export function createEditFileMenu(opts) {
   const state = { open: false, slot: 0, cursor: 0, message: null, fps: null, fpsOn: false, closing: false };
   const M = menuAssets(opts);
   const { A, load, play, measure, drawText } = M;
-  try { state.fpsOn = localStorage.getItem('isaac-fps-viewer') === '1'; } catch (e) { /* no storage */ }
+  // Off on every load. N flips it for this visit only: it used to be remembered,
+  // so one press left a readout over the game for good.
 
   const overlay = document.createElement('canvas');
   overlay.id = 'menu-overlay';
@@ -175,7 +176,6 @@ export function createEditFileMenu(opts) {
   // the FPS readout is a key, not a setting: N flips it (play.mjs), this browser remembers it
   const toggleFps = () => {
     state.fpsOn = !state.fpsOn;
-    try { localStorage.setItem('isaac-fps-viewer', state.fpsOn ? '1' : '0'); } catch (e) { /* no storage */ }
     fpsEl.hidden = !state.fpsOn;
     if (state.fpsOn && !M.isReady()) load().then(() => { fpsEl.hidden = !state.fpsOn; drawFps(); }).catch(() => {});
     else if (state.fpsOn) drawFps();
@@ -359,7 +359,7 @@ export function createPaperMenu(opts) {
   const redraw = () => { st.model = st.get ? st.get() : st.model; draw(); };
 
   const open = async (get, o) => {
-    st.get = get; st.onKey = (o && o.onKey) || null;
+    st.get = get; st.onKey = (o && o.onKey) || null; st.onClose = (o && o.onClose) || null;
     st.cursor = 0; st.top = 0; st.model = null;
     // The art is fetched, and on a served page that takes long enough for a key
     // to arrive in between. Nothing calls itself open until it has rows to show:
@@ -374,6 +374,7 @@ export function createPaperMenu(opts) {
     if (!st.open) return;
     st.open = false; overlay.hidden = true;
     if (sound) play(sound);
+    if (st.onClose) st.onClose();
   };
   const onKey = (ev, down) => {
     if (!st.open) return false;

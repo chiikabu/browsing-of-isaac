@@ -7138,3 +7138,42 @@ key, the 29 windowed chunks come out byte for byte what is already on the host
 and only the four part-A chunks have to be sent. The key is obfuscation, not a
 cipher -- it stops a chunk on a CDN from announcing what it is -- so reusing one
 costs nothing.
+
+### 21.95 Round 81: the row nobody could reach, and the byte that stopped the unlocks
+
+**The mod browser was unreachable.** `createModsMenu` offers its MOD BROWSER row
+only when it has a catalogue base, which it reads from `?catalogue=` or
+`window.isaacModCatalogue`. Nothing ever set either on a built page, so round
+77b's browser -- the catalogue, the parts, the search, the install -- shipped
+twice and could not be opened. `portable.py --catalogue URL` writes the base
+into the page (both shapes), and `--key-of` aside, that is the whole fix.
+
+What let it ship was the driver: `drive_mods.mjs` only ever went through the
+file picker. It serves a catalogue of its own now -- `page.route` answers
+`catalogue.json` and `m/<id>.<n>.bin` for a two-part mod -- walks the cursor to
+the row by name, opens it, types a search, and installs. `state()` grew `rows`,
+`title`, `search` and `current` for that, as labels rather than rows: a driver
+can see what the menu shows but has to press the key a player would.
+
+**Achievements with mods on.** The gate, found rather than remembered:
+
+    0x00929a20  TryUnlock:  cmp byte ptr [esi + 1], 0    ; PGD+1: readonly
+                            jne <exit>
+                            ...
+                            mov byte ptr [edi + esi + 0x38], 1   ; the unlock
+
+`PGD+1` is the whole thing. Past it, the next act is the store that records the
+unlock; the checks after that (`0x009595e0`, `[esi+2]`) govern the Steam call and
+the notification. One function writes that byte -- `SetReadOnly` at
+`0x009299e0`, four call sites, logging `Setting PersistentGameData ReadOnly to
+%s` -- and the game reaches it through its own flag at `Game+0x15` while mods
+are loaded. The block patch at `0x009299e4` reads that function's argument as
+false. Nothing else about the save changes and the engine still logs what it
+did, which is the witness the mods driver watches: the line can only say False.
+
+**And three things about the page.** The FPS readout is off at every load (it
+was remembered in `localStorage`, so one press of N left it over the game for
+good; N still flips it for the visit). The mods menu's key hints are gone. And
+the menu reloads the page when it is closed with a mod that arrived during this
+visit: the engine scans `mods/` once, before `main`, so another boot is the only
+way into its own list.

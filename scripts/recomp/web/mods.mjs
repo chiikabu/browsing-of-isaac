@@ -511,8 +511,7 @@ export function createModsMenu(opts) {
         action: () => (have.has(m.id) ? say(`${m.name} is already installed`) : add(m)),
       }));
       rows.push({ label: 'BACK', action: () => { view = 'installed'; search = ''; message = null; paper.redraw(); } });
-      return { title: 'MOD BROWSER', rows, search, searchHint: 'TYPE TO SEARCH',
-               footer: 'ENTER ADD   ESC BACK', message };
+      return { title: 'MOD BROWSER', rows, search, searchHint: 'TYPE TO SEARCH', message };
     }
     const rows = mods.map((m) => ({
       label: m.name,
@@ -525,18 +524,23 @@ export function createModsMenu(opts) {
     rows.push({ label: 'IMPORT A FOLDER', action: () => dirInput.click() });
     if (o.catalogueBase) rows.push({ label: 'MOD BROWSER', action: () => openBrowse() });
     rows.push({ label: 'BACK', action: () => paper.close('back') });
-    return { title: 'MODS', rows,
-             footer: dirty ? 'ENTER TOGGLE   X REMOVE   R RELOAD' : 'ENTER TOGGLE   X REMOVE   ESC BACK',
-             message: message || (mods.length ? null : 'NO MODS YET') };
+    return { title: 'MODS', rows, message: message || (mods.length ? null : 'NO MODS YET') };
   }
 
   fileInput.addEventListener('change', () => take(fileInput));
   dirInput.addEventListener('change', () => take(dirInput));
 
+  // The engine scans mods/ once, before main. So a mod that arrived during this
+  // visit is in the page's store and not in the game's list, and the only way
+  // into that list is another boot: closing the menu after an import reloads.
+  // R still does it early, for anyone who wants it before closing.
+  const reloadIfNew = () => { if (dirty) location.reload(); };
+
   const open = async () => {
     view = 'installed'; search = ''; message = null;
     await refresh();
     await paper.open(model, {
+      onClose: reloadIfNew,
       onKey: (code, key) => {
         if (code === 'KeyR' && dirty) { location.reload(); return true; }
         if (view === 'browse') {
@@ -556,6 +560,14 @@ export function createModsMenu(opts) {
   return {
     open, close: () => paper.close('back'), isOpen: () => paper.isOpen(), refresh,
     onKey: (ev, down) => paper.onKey(ev, down), element: () => paper.element(),
-    state: () => ({ view, dirty, message, mods: mods.map((m) => ({ id: m.id, name: m.name, enabled: m.enabled })) }),
+    // What a driver can see: the same model the paper draws, flattened. Rows are
+    // labels rather than the rows themselves, so nothing outside can call an
+    // action -- a driver has to press the key a player would.
+    state: () => {
+      const m = model();
+      return { view, dirty, message, search, title: m.title, rows: m.rows.map((r) => r.label),
+               current: (paper.currentRow() || {}).label || null,
+               mods: mods.map((x) => ({ id: x.id, name: x.name, enabled: x.enabled })) };
+    },
   };
 }

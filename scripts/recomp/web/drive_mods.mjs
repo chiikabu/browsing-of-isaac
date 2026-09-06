@@ -1,4 +1,4 @@
-// drive_mods.mjs -- mods, driven the way a player reaches them, on the shipping
+﻿// drive_mods.mjs -- mods, driven the way a player reaches them, on the shipping
 // page (rounds 74 and 76):
 //   node scripts/recomp/web/drive_mods.mjs http://127.0.0.1:8200/play.html <out-dir> [gl=hw] [options=<ini>]
 //
@@ -8,7 +8,9 @@
 // claims that write and opens its own menu, drawn on the game's own paper.
 //
 // Then: a zip built here goes through the picker, the same zip is refused a
-// second time, the page reloads and the engine's own log says it loaded the mod,
+// second time, a second mod is installed out of a catalogue this driver serves
+// (the MOD BROWSER row, which a built page offers only when it carries a
+// catalogue URL -- portable.py --catalogue), the page reloads and the engine's own log says it loaded the mod,
 // the mod is turned off from the game's own list and stays off across a reload
 // (the engine does not read disable.it back, so the page keeps the flag), and
 // finally it is removed. A witness in the save store is checked byte for byte
@@ -38,6 +40,15 @@ const frame = () => page.evaluate(() => window.isaacFrame | 0).catch(() => 0);
 const menu = () => page.evaluate(() => (window.isaacModsMenu ? window.isaacModsMenu.state() : null)).catch(() => null);
 const menuOpen = () => page.evaluate(() => !!(window.isaacModsMenu && window.isaacModsMenu.isOpen())).catch(() => false);
 const message = async () => ((await menu()) || {}).message || '';
+// walk the cursor to a row by name, the way a player finds it
+const toRow = async (label) => {
+  for (let i = 0; i < 24; i++) {
+    const st = await menu();
+    if (st && st.current === label) return true;
+    await hold('ArrowDown'); await sleep(160);
+  }
+  return false;
+};
 const logMatch = (re) => page.evaluate((src) => {
   const r = new RegExp(src), log = window.isaacLog || [];
   for (let i = log.length - 1; i >= 0; i--) if (r.test(String(log[i]))) return String(log[i]).slice(0, 200);
@@ -93,6 +104,42 @@ function zipOf(files) {
 const zip = zipOf(MOD_FILES);
 writeFileSync(join(OUT, 'driver-test-mod.zip'), zip);
 
+// ---- a catalogue, served by this driver ------------------------------------
+// modpack.py's layout: catalogue.json, and each mod's zip cut into parts under
+// jsDelivr's 20 MB ceiling. The base resolves to nothing; every request to it is
+// answered here, so what is checked is the page and not a network.
+const CAT_BASE = 'https://catalogue.invalid/mods';
+const CAT_DIR = 'Catalogue Test Mod';
+const CAT_ZIP = zipOf([
+  [`${CAT_DIR}/metadata.xml`, '<?xml version="1.0" encoding="UTF-8"?>\n<metadata>\n  <name>Catalogue Test Mod</name>\n'
+    + '  <directory>cataloguetestmod</directory>\n  <description>served by drive_mods.mjs</description>\n  <version>1</version>\n</metadata>\n'],
+  [`${CAT_DIR}/main.lua`, 'local mod = RegisterMod("Catalogue Test Mod", 1)\nreturn mod\n'],
+]);
+// cut in two, so joining the parts back up is part of what is checked
+const CAT_PARTS = [CAT_ZIP.subarray(0, CAT_ZIP.length >> 1), CAT_ZIP.subarray(CAT_ZIP.length >> 1)];
+const CATALOGUE = { base: CAT_BASE, mods: [
+  { id: 'cataloguetestmod', name: 'Catalogue Test Mod', description: 'served by drive_mods.mjs',
+    bytes: CAT_ZIP.length, parts: CAT_PARTS.length },
+  // a second row, so a search has something to narrow down
+  { id: 'notthisone', name: 'Some Other Mod', description: 'never installed here', bytes: 1024, parts: 1 },
+] };
+const CORS = { 'access-control-allow-origin': '*' };
+await page.route('**/catalogue.invalid/**', async (route) => {
+  const url = route.request().url();
+  if (url.endsWith('/catalogue.json')) {
+    await route.fulfill({ status: 200, headers: CORS, contentType: 'application/json', body: JSON.stringify(CATALOGUE) });
+    return;
+  }
+  const m = url.match(/\/m\/([a-z0-9_-]+)\.(\d+)\.bin$/);
+  if (m && m[1] === 'cataloguetestmod' && CAT_PARTS[+m[2]]) {
+    await route.fulfill({ status: 200, headers: CORS, contentType: 'application/octet-stream',
+                          body: Buffer.from(CAT_PARTS[+m[2]]) });
+    return;
+  }
+  await route.fulfill({ status: 404, headers: CORS, body: 'no' });
+});
+// what portable.py --catalogue writes into a built page
+await page.addInitScript((base) => { window.isaacModCatalogue = base; }, CAT_BASE);
 // A witness in the save store rather than a real persistentgamedata1.dat: the
 // engine validates those at the file-select screen and would stop on a made-up
 // one. What is being tested is the store, and any key in it proves the point.
@@ -173,6 +220,51 @@ try {
   check(st && st.mods.length === 1, 'and there is still one of it', JSON.stringify(st && st.mods));
   await page.screenshot({ path: join(OUT, '3-imported.png') });
 
+  // ---- the browser: the row is there, it searches, and it installs
+  let st2 = await menu();
+  check(st2 && st2.rows.includes('MOD BROWSER'),
+    'the menu offers MOD BROWSER when the build carries a catalogue',
+    st2 ? st2.rows.join(' / ') : 'no menu');
+  check(await toRow('MOD BROWSER'), 'the cursor reaches it');
+  await hold('Enter');
+  const listed = await until(async () => {
+    const st = await menu();
+    return st && st.title === 'MOD BROWSER' && st.rows.length > 2 ? st : null;
+  }, 20000, 'the catalogue arriving').catch(() => null);
+  check(!!listed, 'Enter on it fetches the catalogue', listed ? `${listed.rows.length} row(s)` : 'nothing');
+  await page.screenshot({ path: join(OUT, '7-browser.png') });
+
+  // typing narrows it: two mods in the catalogue, one of them matches
+  for (const ch of 'catalogue') { await page.keyboard.press(`Key${ch.toUpperCase()}`); await sleep(70); }
+  await sleep(500);
+  const searched = await menu();
+  check(searched && searched.search === 'catalogue'
+    && searched.rows.filter((r) => r !== 'BACK').length === 1,
+    'typing searches it', searched ? `"${searched.search}" -> ${searched.rows.join(' / ')}` : '');
+  await page.screenshot({ path: join(OUT, '8-searched.png') });
+
+  // Enter on the row that is left: two parts fetched, joined, unzipped, stored
+  check(await toRow('Catalogue Test Mod'), 'the cursor is on the mod');
+  await hold('Enter');
+  const added = await until(async () => {
+    const s = await readStores();
+    return s.index.find((x) => x.id === 'cataloguetestmod') || null;
+  }, 25000, 'the catalogue mod installing').catch(() => null);
+  check(!!added, 'Enter on a catalogue row installs it', added ? added.name : 'not installed');
+  const catFiles = (await readStores()).modFiles.filter((f) => f.startsWith('cataloguetestmod/'));
+  check(catFiles.join('|') === 'cataloguetestmod/main.lua|cataloguetestmod/metadata.xml',
+    'the two parts were joined back into the zip they came from', catFiles.join(' '));
+
+  // back to the installed list -- through the BACK row, not Escape: Escape
+  // closes the whole menu, and a menu closed with a new mod in it reloads the
+  // page (that is how an import reaches the engine's own list).
+  check(await toRow('BACK'), 'the browser has a way back');
+  await hold('Enter'); await sleep(600);
+  check(await toRow('Catalogue Test Mod'), 'it is in the installed list now');
+  await hold('KeyX');
+  await until(async () => ((await readStores()).index.find((x) => x.id === 'cataloguetestmod') ? null : true),
+    10000, 'the catalogue mod being removed again');
+
   const stores = await readStores();
   check(stores.modFiles.join('|') === 'drivertestmod/content/isaac.xml|drivertestmod/main.lua|drivertestmod/metadata.xml',
     'the tree survived the zip, root folder peeled off', stores.modFiles.join(' '));
@@ -186,6 +278,13 @@ try {
   check(!!seedLine, 'the pipeline seeded it at the next boot', seedLine || '');
   const loaded = await logMatch(/LOADED MOD .*drivertestmod/i);
   check(!!loaded, 'the engine loaded it from mods/ by its own scan', loaded || '');
+  // Round 81: with a mod loaded the engine would mark its save data read-only,
+  // which is the whole achievement gate. It logs every time it sets that flag,
+  // so the log is the witness: the line may never appear in a run this short,
+  // but if it does it can only say False.
+  const ro = await logMatch(/Setting PersistentGameData ReadOnly to (True|False)/);
+  check(!/ReadOnly to True/.test(ro || ''), 'the engine never marks the save read-only for a modded run',
+    ro || 'it did not set the flag during this run');
 
   // turn it off from the game's own list: the import row sorts first, so one Down
   await toModsList();

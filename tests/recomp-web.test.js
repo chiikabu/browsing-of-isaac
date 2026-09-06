@@ -253,7 +253,11 @@ test('round 52: the EDIT FILE menu -- the page takes the keys while it is up, pr
   const m = readFileSync(join(root, 'scripts', 'recomp', 'web', 'menu_overlay.mjs'), 'utf8');
   assert.ok(m.includes("window.isaacEditFileDelete = state.slot;") && m.includes("injectKey('enter', true);"), 'Delete names the slot and presses confirm: the engine prompt');
   assert.ok(m.includes("['EXPORT FILE', 'IMPORT FILE', 'DELETE FILE', 'BACK']"), 'the entries');
-  assert.ok(m.includes("localStorage.setItem('isaac-fps-viewer', state.fpsOn ? '1' : '0');") && m.includes('const toggleFps = () => {'), 'the fps readout is a toggle this browser remembers');
+  // round 81: it used to be remembered, so one press of N left a readout over
+  // the game for good. Off at every load; N still flips it for the visit.
+  assert.ok(m.includes('const toggleFps = () => {') && m.includes('fpsOn: false'), 'the fps readout is a toggle');
+  assert.ok(!m.includes("localStorage.setItem('isaac-fps-viewer'") && !m.includes("localStorage.getItem('isaac-fps-viewer'"),
+    'and it does not survive a reload');
   assert.ok(p.includes("if (ev.code === 'KeyN' && !ev.repeat") && p.includes('window.isaacEditFileMenu.toggleFps();'), 'N flips the FPS readout (unbound in the game)');
   assert.ok(m.includes("const text = `${Math.round(state.fps)}`;") && m.includes('drawText(gg, text, 2, 2, A.atlasWhite);'), 'the readout is the number alone, in white');
   assert.ok(!p.includes('page-settings.json'), 'no page setting in the saves store');
