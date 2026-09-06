@@ -71,8 +71,30 @@ test('a window is a byte range inside a large chunk, and the payload is a dozen 
 test('the pieces of a read are fetched in parallel', () => {
   // 49 MB of module in 1 MiB pieces, one at a time, was 23.2 s to the first frame
   assert.match(portable, /for \(var w = 0; w < Math\.min\(6, parts\.length\); w\+\+\) crew\.push\(worker\(\)\);/);
-  assert.match(portable, /if \(r\.status !== 206 \|\| u\.length !== p\.take\) \{/, 'a host that ignores Range is noticed and not asked again');
-  assert.match(portable, /ranges = false;/);
+  assert.match(portable, /if \(r\.status === 206 && u\.length === p\.take\) return unscramble/, 'the window, when the answer is the window');
+  assert.match(portable, /ranges = false;/, 'and a host that ignores Range is noticed and not asked again');
+});
+
+test('round 83: an answer that is not the window is not treated as the chunk', () => {
+  // It used to slice whatever came back and cache it under the chunk's key: right
+  // for a host that ignores Range (200, the whole chunk), and for one that answers
+  // 206 with the wrong bytes it returned nothing AND left a short buffer behind,
+  // so every later window in that chunk came back empty too.
+  assert.match(portable, /if \(r\.status === 200 && whole >= 0 && u\.length === whole\) \{/);
+  assert.match(portable, /cache\.delete\(p\.s \+ ':' \+ p\.i\);/, 'the bad answer does not stay in the cache');
+  assert.match(portable, /return \(await piece\(p\.s, p\.i\)\)\.subarray\(p\.within, p\.within \+ p\.take\);/,
+    'and the window comes from the chunk fetched whole');
+});
+
+test('round 83: one failed fetch does not end the run', () => {
+  // `lazy pread FAILED ... the reader had no bytes` on a window the host answered
+  // correctly the moment it was asked again: a blip, and the Worker's answer to
+  // any failure was to hand the engine nothing, which returns -1 and traps.
+  assert.match(bootWeb, /for \(let a = 0; a < 3; a\+\+\) \{/, 'three tries');
+  assert.match(bootWeb, /await new Promise\(\(res\) => setTimeout\(res, 120 \* a \* a\)\);/, 'with a backoff');
+  assert.match(bootWeb, /const r = await fetch\(url\);\s*\n\s*if \(!r\.ok\) throw new Error\('whole chunk: HTTP ' \+ r\.status\);/,
+    'and then the whole chunk, which needs no Range');
+  assert.match(bootWeb, /tries\(\)\.then\(\(buf\) => \{/);
 });
 
 test('round 78: a host whose ranges lie does not start the reader Worker', () => {

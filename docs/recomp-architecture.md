@@ -7212,3 +7212,33 @@ percentage.
 bone white with square corners, one line in caps. The five named stages, their
 byte counts and the machine string were instruments; they are under `?stats=1`
 with the rest of them.
+
+### 21.97 Round 83: one fetch failed and the run ended
+
+    lazy pread FAILED for resources/packed/videos.a at 84934656+587470:
+    the reader had no bytes
+
+That window is the last 587,470 bytes of `b28.bin`, the final chunk, and the host
+answers exactly that range correctly when asked again -- 206, the right length,
+`bytes 1048576-1636045/1636046`. So one fetch failed transiently: a rate limit, a
+dropped connection, a 5xx. The Worker's answer to any failure was to post no
+buffer, `failRead` returns -1 to the engine, and -1 from a pread is a trap.
+
+Three attempts with a short backoff, and then the same window taken from the
+chunk fetched whole, which carries no Range and so cannot be refused for one. The
+cost of a blip is a moment instead of the run.
+
+Reading that path turned up a second, quieter one. The provider's `ranged()`
+treated **any** answer that was not the window as if it were the whole chunk:
+sliced it, and cached it under the chunk's key. For a host that ignores Range
+(200, the chunk's length) that is right. For one that answers 206 with the wrong
+bytes it returns nothing -- and leaves a short buffer in the cache, so every
+later window in that chunk comes back empty too. It takes that route only on a
+200 of exactly the chunk's length now, and otherwise drops the answer and
+re-fetches the chunk.
+
+And the loading screen, twice over. The grid of five named stages was being put
+back by the chunk-counting hook (`stagesEl.hidden = false`), so the one build
+that is not a development build was the one showing every instrument. The bar
+itself was drawn in pips, which reads as a barcode rather than as a bar: it is a
+2px hairline with a solid fill now, over black, with one line in caps under it.

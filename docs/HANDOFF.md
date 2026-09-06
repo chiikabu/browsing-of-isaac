@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-06, recomp rounds 26-82: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-83: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -181,6 +181,16 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 83: one fetch failed and the run ended** (§21.97).
+  `lazy pread FAILED ... the reader had no bytes` on the last window of the last
+  chunk -- a window the host answers correctly the moment it is asked again. The
+  reader had no retry and a pread that returns -1 traps, so a blip ended the
+  run: **three tries with a backoff, then the whole chunk**, which carries no
+  Range. The provider also treated any non-window answer as the whole chunk,
+  slicing it and caching it under the chunk's key, which returned nothing and
+  poisoned every later window in that chunk. And the loading screen: the stage
+  grid was being put back by the chunk hook on exactly the build that should not
+  show it, and the bar is a hairline rather than pips.
 - **Round 82: the row that cost the achievements, and two quiet failures** (§21.96).
   Round 81's unlock patch did not clear the indicator because the gate was
   upstream of it: `mods/ import mod/` **is a mod**, so every run was a modded

@@ -337,7 +337,12 @@ test('round 82: the loading screen is the bar and one line', () => {
   assert.match(play, /setStatus\('loading', name\);/, "the engine's stage names are the detail, not the line");
   // and the look: square corners, the menu's bone white, pips rather than a fill
   assert.match(html, /--load: #d7c9a7; --load-dim: #7d7263;/);
-  assert.match(html, /repeating-linear-gradient\(90deg, var\(--load\) 0 3px, transparent 3px 5px\)/);
+  // round 83: the pips read as a barcode. A hairline and a solid fill.
+  assert.match(html, /#bar \{ width: min\(200px, 44%\); height: 2px; background: #2a241e; \}/);
+  assert.match(html, /#bar-fill \{ width: 0; height: 100%; background: var\(--load\);/);
+  assert.doesNotMatch(html, /repeating-linear-gradient/);
+  // and the grid is not put back on a chunked build's loading screen
+  assert.doesNotMatch(play, /if \(stagesEl\) stagesEl\.hidden = false;/);
   assert.ok(!/#bar \{[^}]*border-radius/.test(html), 'nothing in this game is rounded');
 });
 

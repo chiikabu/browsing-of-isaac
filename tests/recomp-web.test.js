@@ -290,7 +290,9 @@ test('round 55/56: the boot trail, and every archive window read by a Worker wit
   assert.ok(b.includes("if (n >= 300 && !trailWritten) writeTrail();") && b.includes("if (!trailWritten && (window.isaacFrame | 0) >= 300) writeTrail();") && !b.includes("presented === 300") && b.includes("window.addEventListener('pagehide', () => { writeTrail(); if (reader) reader.terminate(); });"),
     'the trail is written by the host frame counter at frame 300 (isaacPresent never fires on the served page), or when the page goes');
   assert.ok(b.includes("w = new Worker(URL.createObjectURL(new Blob([READER_WORKER], { type: 'text/javascript' })));"), 'the reader is a Worker of this origin');
-  assert.ok(b.includes("fetch(url, init).then((r) => (r.ok ? r.arrayBuffer() : null))")
+  // round 83: the fetch is three tries and then the whole chunk, because one
+  // failed window returned -1 to the engine and trapped the run
+  assert.ok(b.includes('const r = await fetch(url, init);') && b.includes('if (r.ok) return await r.arrayBuffer();')
     && b.includes('let xorKey = null;') && b.includes("postMessage({ want: w, buf, hit: why !== 'want', pf: prefetched, ah: ahead }, buf ? [buf] : []);"), 'the Worker fetches raw bytes and transfers each window');
   // round 70: a portable chunk holds many windows, and the range rides in the
   // fragment because a fragment never reaches the server

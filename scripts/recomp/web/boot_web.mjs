@@ -254,7 +254,29 @@ function start(key, url, len, why, want) {
     url = url.slice(0, h);
     init = { headers: { Range: 'bytes=' + want0 + '-' + want1 } };
   }
-  fetch(url, init).then((r) => (r.ok ? r.arrayBuffer() : null)).then((buf) => {
+  // Round 83: one fetch that fails must not end the run. A read that comes back
+  // empty returns -1 to the engine, which traps -- and the window that did this
+  // was answered correctly the moment it was asked again, so it was a blip: a
+  // rate limit, a dropped connection, a 5xx. Three tries with a short backoff,
+  // and then the whole chunk, which needs no Range and so cannot be refused for
+  // one.
+  const tries = async () => {
+    let last = null;
+    for (let a = 0; a < 3; a++) {
+      if (a) await new Promise((res) => setTimeout(res, 120 * a * a));
+      try {
+        const r = await fetch(url, init);
+        if (r.ok) return await r.arrayBuffer();
+        last = 'HTTP ' + r.status;
+      } catch (e) { last = (e && e.message) || 'fetch failed'; }
+    }
+    if (want0 < 0) throw new Error(last || 'fetch failed');
+    // no range this time: the whole chunk, cut here
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('whole chunk: HTTP ' + r.status);
+    return await r.arrayBuffer();
+  };
+  tries().then((buf) => {
     // a host that ignored the Range sent the whole chunk: put it back from the
     // chunk's own start, then cut out the window
     if (buf && want0 >= 0 && buf.byteLength > want1 - want0 + 1) buf = unscramble(buf, at >= 0 ? at - want0 : -1).slice(want0, want1 + 1);

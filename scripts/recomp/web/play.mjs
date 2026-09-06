@@ -177,8 +177,9 @@ hooks.noReader = !!(portable && !portable.urlFor);
 // the status line is the only progress that exists for that wait.
 if (portable && portable.chunks) {
   stages.chunks.total = portable.chunks;
-  const stagesEl = $('stages');
-  if (stagesEl) stagesEl.hidden = false;
+  // round 82: the grid is an instrument. It used to be shown here, which put all
+  // five rows and their byte counts back on the loading screen of every chunked
+  // build -- the one build that is not a development one.
   render();
   window.__isaacPortableData.onChunk = (got, total) => {
     stages.chunks.received = got;

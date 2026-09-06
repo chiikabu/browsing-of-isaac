@@ -352,13 +352,21 @@ PROVIDER_JS = r"""
     if (!r.ok) throw new Error('range ' + p.s + ':' + p.i + ': HTTP ' + r.status);
     var u = new Uint8Array(await r.arrayBuffer());
     note(p.s, p.i);
-    if (r.status !== 206 || u.length !== p.take) {
-      ranges = false;                                  // this host does not do ranges
+    if (r.status === 206 && u.length === p.take) return unscramble(u, p.i * S[p.s].size + p.within);
+    // Round 83: the answer is not the window that was asked for. A host that
+    // ignores Range sends the whole chunk (200, the chunk's length) and that can
+    // be sliced; one that answers 206 with the wrong bytes cannot, and slicing it
+    // returned nothing -- and left that short buffer in the cache under the
+    // chunk's key, so every later window in the chunk came back empty too.
+    ranges = false;
+    var whole = chunkLen(p.s, p.i);
+    if (r.status === 200 && whole >= 0 && u.length === whole) {
       u = unscramble(u, p.i * S[p.s].size);
       cache.set(p.s + ':' + p.i, u);
       return u.subarray(p.within, p.within + p.take);
     }
-    return unscramble(u, p.i * S[p.s].size + p.within);
+    cache.delete(p.s + ':' + p.i);
+    return (await piece(p.s, p.i)).subarray(p.within, p.within + p.take);
   }
   async function gather(parts) {
     var total = parts.reduce(function (n, p) { return n + p.take; }, 0);
