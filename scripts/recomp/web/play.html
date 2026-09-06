@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Isaac, recompiled</title>
 <style>
-  :root { --bg: #14110f; --panel: #211b17; --edge: #3a2f27; --ink: #e9dfcf; --dim: #a1937f; --accent: #e0a842; --bar: #7a5a2f; --err: #d24d3f; --ok: #79b36a; }
+  :root { --bg: #14110f; --panel: #211b17; --edge: #3a2f27; --ink: #e9dfcf; --dim: #a1937f; --accent: #e0a842; --bar: #7a5a2f; --err: #d24d3f; --ok: #79b36a;
+          /* the menu's bone white, and the dimmer one its labels are drawn in */
+          --load: #d7c9a7; --load-dim: #7d7263; }
   html, body { height: 100%; margin: 0; }
   [hidden] { display: none !important; }   /* the page's own display rules must not outrank the hidden attribute */
   body { background: #000; color: var(--ink); font: 14px/1.4 system-ui, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
@@ -19,19 +21,24 @@
   #stage:fullscreen { display: flex; align-items: center; justify-content: center; background: #000; }
   #canvas { display: block; width: 100%; height: 100%; background: #000; outline: none; image-rendering: pixelated; image-rendering: crisp-edges; }
   #stage:fullscreen #canvas { width: min(100vw, calc(100vh * 16 / 9)); height: min(100vh, calc(100vw * 9 / 16)); }
-  /* the loader: one bar and one line over black, gone at the first frame */
-  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #000; }
-  #bar { width: min(260px, 60%); height: 3px; background: #2a2420; border-radius: 2px; overflow: hidden; }
-  #bar-fill { width: 0; height: 100%; background: var(--accent); transition: width .15s linear; }
-  #overlay .note { color: var(--dim); font-size: 12px; max-width: 44em; text-align: center; }
+  /* The loader: black, one segmented bar and one line in caps, gone at the first
+     frame. The bar is drawn in pips rather than a smooth fill and has square
+     corners, because nothing in this game is rounded. */
+  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: #000; }
+  #bar { width: min(184px, 46%); height: 6px; box-sizing: content-box; border: 2px solid #3b322a; background: #0b0a09; }
+  #bar-fill { width: 0; height: 100%; transition: width .12s linear;
+              background: repeating-linear-gradient(90deg, var(--load) 0 3px, transparent 3px 5px); }
+  #overlay .note { color: var(--load-dim); font: 10px/1.6 ui-monospace, "Courier New", monospace;
+                   letter-spacing: .24em; text-transform: uppercase; max-width: 40em; text-align: center; }
   #stages { display: grid; grid-template-columns: max-content minmax(160px, 28vw) max-content; gap: 6px 12px; align-items: center; font-variant-numeric: tabular-nums; }
   #stages .name { text-align: right; color: var(--dim); }
   #stages .name.done { color: var(--ok); }
   #stages .name.active { color: var(--ink); }
   #stages progress { width: 100%; height: 10px; accent-color: var(--accent); }
   #stages .bytes { font-size: 12px; color: var(--dim); min-width: 11em; text-align: left; }
-  #play { font-size: 24px; padding: 10px 44px; margin-top: 8px; background: var(--accent); color: #1b1410; border: 0; border-radius: 6px; font-weight: 700; letter-spacing: .1em; }
-  #play:hover { background: #f0b74e; }
+  #play { font: 12px/1 ui-monospace, "Courier New", monospace; letter-spacing: .3em; padding: 9px 26px; margin-top: 2px;
+           background: transparent; color: var(--load); border: 2px solid #3b322a; border-radius: 0; }
+  #play:hover { background: transparent; color: #fff; border-color: var(--load); }
   #streaming { font-variant-numeric: tabular-nums; }
   /* opt-in chrome: ?stats=1 shows the live status line, ?saves=1 the saves button */
   #fps { position: fixed; left: 6px; top: 4px; z-index: 3; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; text-shadow: 0 0 3px #000; }

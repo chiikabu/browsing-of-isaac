@@ -7177,3 +7177,38 @@ good; N still flips it for the visit). The mods menu's key hints are gone. And
 the menu reloads the page when it is closed with a mod that arrived during this
 visit: the engine scans `mods/` once, before `main`, so another boot is the only
 way into its own list.
+
+### 21.96 Round 82: the row that cost the achievements, and two quiet failures
+
+Round 81 took the engine's unlock gate out and the achievement indicator stayed
+on. The reason was upstream of the gate: `mods/ import mod/` is a mod, and a mod
+loaded is a modded run. The row existed only to give the player something to
+press Enter on, and it was quietly making every run a modded one -- on a save
+with nothing installed.
+
+It is seeded only once the player has a mod of their own, by which point the run
+is modded anyway. With none, the way in is the EDIT FILE menu: **MODS** between
+DELETE FILE and BACK, on the save-select screen. That menu is the page's own and
+costs no mod. Both drivers walk that menu by row name now (`rows()`/`current()`
+on the menu, labels rather than rows) because counting presses walked into the
+new entry -- drive_saves opened the mods menu instead of BACK and every key after
+it went to the wrong place.
+
+**EnableMods=0 was the quietest failure this port has had.** Round 76 made it the
+default, options are written once and then kept, so a browser that visited since
+carried it: the mod imports, the page seeds it, the engine lists it, and the mod
+manager never runs it. Nothing errors, nothing logs, the mod simply does nothing.
+Installing a mod now turns it on once (`enableModsInOptions`, through the menu's
+`onInstalled`), because installing one is choosing to have mods on; the game's
+own TAB still wins afterwards.
+
+**A download says how far along it is.** `onProgress` fired once a part had
+finished, so a mod that is one 19 MB part showed nothing until it arrived -- a
+menu that looks hung. The parts are read as streams and the progress is in bytes
+against the size the catalogue already carries, shown on the row itself as a
+percentage.
+
+**And the loading screen is the game's.** Black, one segmented bar in the menu's
+bone white with square corners, one line in caps. The five named stages, their
+byte counts and the machine string were instruments; they are under `?stats=1`
+with the rest of them.

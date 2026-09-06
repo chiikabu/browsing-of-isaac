@@ -449,8 +449,12 @@ test('play.html + play.mjs wrap the pipeline: the hooks, the Play click unlocks 
     assert.ok(al.includes(s), `the AL shim adopts the shape the page creates: ${s}`);
   assert.ok(page.includes("if (AUTOPLAY) { start(); return; }"), 'autoplay skips the button');
   assert.ok(page.includes("const AUTOPLAY = params.get('autoplay') !== '0';"), 'round 51: the page starts on its own; autoplay=0 keeps the Play button');
-  assert.ok(page.includes("if (params.get('stats') === '1') $('fps').hidden = false;") && page.includes("if (params.get('saves') === '1') $('saves-btn').hidden = false;"),
-    'the status line and the saves button are opt-in');
+  // round 82: ?stats=1 also brings back the named stages and their byte counts,
+  // which the loading screen no longer shows
+  assert.ok(page.includes("const STATS = params.get('stats') === '1';")
+    && page.includes("if (STATS) { $('fps').hidden = false; $('stages').hidden = false; }")
+    && page.includes("if (params.get('saves') === '1') $('saves-btn').hidden = false;"),
+    'the instruments and the saves button are opt-in');
   assert.ok(page.includes("$('bar-fill').style.width = `${pct.toFixed(1)}%`;"), 'one bar for the three fetch stages and the boot');
   assert.ok(page.includes("if (ev.code === 'KeyF' && !ev.repeat && !ev.ctrlKey && !ev.altKey && !ev.metaKey && !$('saves').open && !(window.isaacEditFileMenu && window.isaacEditFileMenu.isOpen())) toggleFullscreen();"), 'F toggles fullscreen (not while the EDIT FILE menu is up)');
   assert.ok(page.includes("stage.requestFullscreen().then(() => canvas.focus())"), 'fullscreen keeps the keyboard on the canvas');

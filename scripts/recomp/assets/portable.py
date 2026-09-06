@@ -590,7 +590,7 @@ def cmd_chunks(args) -> int:
                {"tag": "b", "size": b_size, "gz": False, "n": n_b, "bytes": b_len}]
     data = {"streams": streams, "files": table, "base": args.base or "./c",
             "index": index_for(args.dist, files), "manifest": manifest_for(args.dist, files),
-            "chunks": n_a + n_b, "status": "loading…"}
+            "chunks": n_a + n_b, "status": "loading"}
     if key:
         data["key"] = base64.b64encode(key).decode("ascii")
     # the boot trail is small and boot_web.mjs asks for it by name: inline it so the
@@ -649,7 +649,7 @@ def cmd_offline(args) -> int:
                {"tag": "b", "size": piece, "gz": False, "n": n_b, "first": n_a}]
     data = {"streams": streams, "files": table, "base": None,
             "index": index_for(args.dist, files), "manifest": manifest_for(args.dist, files),
-            "status": "loading… (this page carries the game)"}
+            "status": "loading"}
     parts = ['<script>window.__isaacPortableData = ' + json.dumps(data, separators=(",", ":")) + ';',
              'window.__isaacPortableData.blobs = [];</script>\n', catalogue_script(args)]
     state = {"budget": 0, "group": [], "groups": 0}

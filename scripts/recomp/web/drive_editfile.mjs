@@ -72,8 +72,14 @@ try {
   check(st && st.open, 'confirming on a file opens the EDIT FILE menu, not the engine prompt', st ? `open at frame ${st.f}` : 'not open');
   await sleep(600);
   await page.screenshot({ path: join(OUT, 'menu-open.png') });
-  // BACK (the last entry) closes it
-  for (let i = 0; i < 3; i++) { await hold('ArrowDown'); await sleep(150); }
+  // BACK closes it -- walked to by name, because MODS joined the list in round 82
+  const rows = await page.evaluate(() => window.isaacEditFileMenu.rows());
+  check(rows.includes('MODS'), 'the file menu carries MODS, the way to the mods menu with no mod installed', rows.join(' / '));
+  for (let i = 0; i < 8; i++) {
+    const at = await page.evaluate(() => window.isaacEditFileMenu.current());
+    if (at === 'BACK') break;
+    await hold('ArrowDown'); await sleep(150);
+  }
   await hold('Enter'); await sleep(400);
   st = await state();
   check(!st.open, 'BACK closes the menu', `open=${st.open}`);

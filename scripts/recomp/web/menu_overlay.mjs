@@ -172,7 +172,10 @@ export function createEditFileMenu(opts) {
   fpsEl.hidden = true;
   stage.appendChild(fpsEl);
 
-  const items = () => ['EXPORT FILE', 'IMPORT FILE', 'DELETE FILE', 'BACK'];
+  // MODS is here because the import row in the game's own list is a mod, and a
+  // mod loaded makes the run a modded one. This menu is the page's already.
+  const items = () => (actions.mods ? ['EXPORT FILE', 'IMPORT FILE', 'DELETE FILE', 'MODS', 'BACK']
+                                    : ['EXPORT FILE', 'IMPORT FILE', 'DELETE FILE', 'BACK']);
   // the FPS readout is a key, not a setting: N flips it (play.mjs), this browser remembers it
   const toggleFps = () => {
     state.fpsOn = !state.fpsOn;
@@ -185,8 +188,9 @@ export function createEditFileMenu(opts) {
     if (!state.open || !M.isReady()) return;
     const R = A.menu.rects, [px0, py0] = R.prompt_at, [sx, sy, sw, sh0] = R.prompt_paper;
     // the seed paper (blank) where the engine draws its own prompt, the prompt
-    // paper's width and a little taller: a title and five entries
-    const sh = sh0 + 24, px = px0, py = py0 - 12;
+    // paper's width and taller by however many entries there are: a title, the
+    // rows at lineH, and room under them for the message
+    const sh = sh0 + 24 + (items().length - 4) * 17, px = px0, py = py0 - 12;
     g.clearRect(0, 0, overlay.width, overlay.height);
     g.drawImage(A.paper, 0, 0, A.paper.width, A.paper.height, px * SCALE, py * SCALE, sw * SCALE, sh * SCALE);
     const title = `FILE ${state.slot + 1}`;
@@ -232,8 +236,9 @@ export function createEditFileMenu(opts) {
     log('[menu] EDIT FILE closed');
   };
   const select = async () => {
-    const i = state.cursor;
-    if (i === 3) { close('back'); return; }
+    const i = state.cursor, rows = items();
+    if (rows[i] === 'BACK') { close('back'); return; }
+    if (rows[i] === 'MODS') { play('select'); close(null); actions.mods(); return; }
     if (i === 2) {
       // the engine's own prompt: the gate lets the transition through when the
       // page has named the slot, and the confirm is pressed for the player
@@ -274,6 +279,10 @@ export function createEditFileMenu(opts) {
     isOpen: () => state.open,
     message: () => state.message,
     fpsViewer: () => state.fpsOn,
+    // what the menu is showing, so a driver can walk to a row by name rather
+    // than by counting presses (the entries are not always the same four)
+    rows: () => items(),
+    current: () => items()[state.cursor] || null,
     setFps: (fps) => { state.fps = fps; if (state.fpsOn) { if (!M.isReady()) load().then(() => { fpsEl.hidden = false; drawFps(); }).catch(() => {}); else { fpsEl.hidden = false; drawFps(); } } },
     preload: load,
     element: overlay,

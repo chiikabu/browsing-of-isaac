@@ -1,4 +1,4 @@
-﻿// drive_mods.mjs -- mods, driven the way a player reaches them, on the shipping
+// drive_mods.mjs -- mods, driven the way a player reaches them, on the shipping
 // page (rounds 74 and 76):
 //   node scripts/recomp/web/drive_mods.mjs http://127.0.0.1:8200/play.html <out-dir> [gl=hw] [options=<ini>]
 //
@@ -60,6 +60,28 @@ const toModsList = async () => {
   await hold('Enter'); await sleep(2600);
   await hold('Enter'); await sleep(2200);
   await hold('Tab'); await sleep(2000);
+};
+// Round 82: with no mod installed there is no IMPORT MOD row, because the row is
+// itself a mod and a mod loaded makes the run a modded one. The way in is the
+// page's own EDIT FILE menu: title -> file select -> the EDIT FILE strip -> file
+// 1 -> MODS.
+const editMenu = () => page.evaluate(() => (window.isaacEditFileMenu
+  ? { open: window.isaacEditFileMenu.isOpen(), current: window.isaacEditFileMenu.current(),
+      rows: window.isaacEditFileMenu.rows() }
+  : null)).catch(() => null);
+const toModsViaFileMenu = async () => {
+  await hold('Enter'); await sleep(1800);
+  await hold('Enter'); await sleep(2600);
+  await hold('ArrowDown'); await sleep(700);   // onto the EDIT FILE strip
+  await hold('Enter'); await sleep(1000);      // file-choosing mode
+  await hold('Enter');                         // file 1: the page's menu
+  await until(async () => { const s = await editMenu(); return s && s.open ? s : null; }, 8000, 'the EDIT FILE menu');
+  for (let i = 0; i < 8; i++) {
+    const s = await editMenu();
+    if (s && s.current === 'MODS') break;
+    await hold('ArrowDown'); await sleep(180);
+  }
+  await hold('Enter');
 };
 const boot = async () => {
   await until(async () => (await frame()) > 0, 600000, 'first frame');
@@ -192,15 +214,17 @@ try {
   await page.goto(URL);
   await boot();
   check(!!(await logMatch(/=== seed mods ===/)), 'the pipeline seeded mods');
-  const found = await logMatch(/LOADED MOD .*import mod/i);
-  check(!!found, 'the engine found the IMPORT MOD row on its own scan', found || '');
+  // Round 82: nothing is seeded on a save with no mods, so the run is not a
+  // modded one and the achievement indicator stays off. This is the check that
+  // the import row is not costing a fresh player their unlocks.
+  const early = await logMatch(/LOADED MOD .*import mod/i);
+  check(!early, 'with no mods installed the engine loads no mod at all', early || 'nothing loaded');
   check(!/[?&]ISAAC_YIELD=/.test(page.url()), 'the page did not write its defaults into the address bar', page.url());
 
-  await toModsList();
-  await page.screenshot({ path: join(OUT, '1-mods-list.png') });
-  await hold('Enter');
+  await toModsViaFileMenu();
   await until(menuOpen, 8000, 'the paper menu opening');
-  check(true, 'Enter on the IMPORT MOD row opened the menu');
+  check(true, 'MODS on the EDIT FILE menu opened it, with no mod to press Enter on');
+  await page.screenshot({ path: join(OUT, '1-mods-list.png') });
   await sleep(400);
   await page.screenshot({ path: join(OUT, '2-menu.png') });
 
@@ -276,6 +300,9 @@ try {
   await boot();
   const seedLine = await logMatch(/Driver Test Mod \(drivertestmod\)/);
   check(!!seedLine, 'the pipeline seeded it at the next boot', seedLine || '');
+  // and now that there is a mod of the player's own, the in-game row is back
+  const row = await logMatch(/LOADED MOD .*import mod/i);
+  check(!!row, 'the IMPORT MOD row comes back once a mod is installed', row || 'not loaded');
   const loaded = await logMatch(/LOADED MOD .*drivertestmod/i);
   check(!!loaded, 'the engine loaded it from mods/ by its own scan', loaded || '');
   // Round 81: with a mod loaded the engine would mark its save data read-only,
@@ -304,12 +331,14 @@ try {
   check(!(await logMatch(/LOADED MOD .*drivertestmod/i)), 'after a reload the engine does not load it',
     (await logMatch(/LOADED MOD .*drivertestmod/i)) || 'not loaded');
   check(!!(await logMatch(/1 off/)), 'and the seed stage says why', (await logMatch(/mod\(s\).*off/)) || '');
-  await toModsList();
+  // Its only mod is off, so nothing is seeded -- not even the import row, which
+  // is the point: no mod loaded, no modded run. The file menu is the way back.
+  await toModsViaFileMenu();
+  await until(menuOpen, 8000, 'the menu opening again');
+  await sleep(400);
   await page.screenshot({ path: join(OUT, '5-list-without-it.png') });
 
   // remove it from the page's menu, and the save is still there
-  await hold('Enter');
-  await until(menuOpen, 8000, 'the menu opening again');
   await hold('KeyX'); await sleep(1200);
   const gone = await until(async () => { const m = await message(); return /REMOVED/.test(m) ? m : null; }, 8000, 'the removal').catch(() => '');
   check(/REMOVED/.test(gone), 'removing it says so', gone);

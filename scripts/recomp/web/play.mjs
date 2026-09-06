@@ -42,7 +42,11 @@ const canvas = $('canvas'), overlay = $('overlay'), playBtn = $('play'), statusE
 // opt-in chrome (round 51): ?stats=1 shows the live status line, ?saves=1 the
 // saves button; the page is otherwise the game alone, and a click anywhere
 // gives the canvas the keyboard
-if (params.get('stats') === '1') $('fps').hidden = false;
+// Round 82: the loading screen is black, one bar and one short line. The named
+// stages, their byte counts and the machine string are instruments, and they
+// live where the rest of the page's instruments do.
+const STATS = params.get('stats') === '1';
+if (STATS) { $('fps').hidden = false; $('stages').hidden = false; }
 if (params.get('saves') === '1') $('saves-btn').hidden = false;
 document.addEventListener('pointerdown', () => { if (!$('saves').open) canvas.focus(); });
 // F toggles fullscreen on the stage (the keydown is the gesture requestFullscreen
@@ -111,7 +115,13 @@ function render() {
     $('bar-fill').style.width = `${pct.toFixed(1)}%`;
   });
 }
-function setStatus(text) { statusEl.textContent = text; }
+// The line under the bar. `text` is what the page has to say; the detail -- an
+// engine stage name, a path, an error -- goes in the tooltip and, under ?stats=1,
+// on the line itself. A loading screen is not the place for internals.
+function setStatus(text, detail) {
+  statusEl.textContent = STATS && detail ? detail : text;
+  statusEl.title = detail || text;
+}
 
 // ---- the portable provider (round 70) ----------------------------------------
 // A build with no server sets window.isaacPortable before this module runs: it
@@ -142,7 +152,7 @@ if (portable) {
 } else try {
   indexBytes = new Uint8Array(await (await fetch(rewrite('/instance_index.json'), { cache: 'no-cache' })).arrayBuffer());
   index = JSON.parse(new TextDecoder().decode(indexBytes));
-} catch (e) { setStatus(`instance_index.json: ${e.message}`); }
+} catch (e) { setStatus('loading', `instance_index.json: ${e.message}`); }
 const indexSize = new Map(index.map((e) => [e.p, e.s]));
 stages.module.total = sizeOf('boot.wasm');
 stages.image.total = sizeOf('isaac.segs.bin');
@@ -151,9 +161,9 @@ stages.archives.total = EAGER_ARCHIVES.reduce((s, n) => s + (indexSize.get(`reso
 const stageFor = (rel) => rel === 'isaac.segs.bin' ? stages.image
   : rel.startsWith('instance/resources/packed/') || rel.startsWith('instance/resources/scripts/') ? stages.archives : null;
 render();
-if (portable) setStatus(portable.status || 'loading\u2026');
-else if (location.protocol === 'file:') setStatus('this page needs a server (node scripts/recomp/web/serve_dist.mjs <dist>): the game reads its archives as byte slices');
-else setStatus(manifest ? 'loading\u2026' : 'no dist.json: sizes unknown');
+if (portable) setStatus(portable.status || 'loading');
+else if (location.protocol === 'file:') setStatus('needs a server', 'this page needs a server (node scripts/recomp/web/serve_dist.mjs <dist>): the game reads its archives as byte slices');
+else setStatus('loading', manifest ? null : 'no dist.json: sizes unknown');
 
 // ---- the hooks -----------------------------------------------------------------
 let streamed = 0, streamedRequests = 0;
@@ -174,7 +184,7 @@ if (portable && portable.chunks) {
     stages.chunks.received = got;
     stages.chunks.total = total || stages.chunks.total;
     stages.chunks.done = got >= stages.chunks.total;
-    setStatus(`loading\u2026 chunk ${got} of ${stages.chunks.total}`);
+    setStatus(`loading ${got} / ${stages.chunks.total}`);
     render();
   };
 }
@@ -261,7 +271,7 @@ hooks.instantiateWasm = (info, receive) => {
       const bytes = await portable.bytesFor('boot.wasm', 0, 0);
       st.received = bytes.length; st.done = true; render();
       const { instance, module } = await WebAssembly.instantiate(bytes, info);
-      setStatus('loading\u2026');
+      setStatus('loading');
       receive(instance, module);
       return;
     }
@@ -283,7 +293,7 @@ hooks.instantiateWasm = (info, receive) => {
     })().catch(() => {});
     const { instance, module } = await WebAssembly.instantiateStreaming(res, info);
     st.done = true; render();
-    setStatus('loading\u2026');
+    setStatus('loading');
     receive(instance, module);
   })().catch((e) => showError('The module failed to load', e.message));
   return {};
@@ -296,7 +306,7 @@ hooks.beforeMain = (m) => new Promise((resolve) => {
     unlockAudio(m);
     playBtn.hidden = true;
     $('stages').hidden = true;
-    setStatus('starting\u2026');
+    setStatus('starting');
     resolve();
     // Round 46: a frame-rate readout in the status line once the engine runs --
     // the host's frame counter sampled each second, the median of the last
@@ -324,13 +334,13 @@ hooks.beforeMain = (m) => new Promise((resolve) => {
       if (first) { first = false; render(); }
       const note = document.hidden ? ' -- paused while hidden' : (nrDelta > 0 ? ` -- no animation frames (${nrDelta} timer tick(s) this second: occluded?)` : '');
       const line = `${fps.toFixed(0)} fps (median of the last ${recent.length} s: ${med.toFixed(0)}) -- frame ${f}${note}`;
-      setStatus(line + machine);                       // the overlay's line, until the first frame hides the overlay
+      setStatus('running', line + machine);            // the overlay is gone by now; ?stats=1 still shows it
       const fpsEl = $('fps'); fpsEl.textContent = line; fpsEl.title = line + machine;   // the header's, live during play
       editMenu.setFps(fps);                                                          // the in-game FPS VIEWER, when on
     }, 1000);
   };
   if (AUTOPLAY) { start(); return; }
-  setStatus('ready');
+  setStatus('press play');
   playBtn.hidden = false;
   playBtn.focus();
   playBtn.addEventListener('click', start, { once: true });
@@ -341,7 +351,8 @@ hooks.onLog = (line) => {
     if (name === 'layout') { stages.image.done = true; }
     else if (name === 'host boot (IAT + TEB + TLS + _initterm)') { stages.archives.done = true; stages.boot.received = 1; }
     else if (name.startsWith('main @')) { stages.boot.done = true; }
-    setStatus(name);
+    // the engine's own stage names are the detail, not the line
+    setStatus('loading', name);
     render();
     return;
   }
@@ -445,7 +456,10 @@ const editMenu = createEditFileMenu({
   audioContext: () => (moduleRef && moduleRef.isaacAudio && moduleRef.isaacAudio.ctx) || null,
   injectKey: (name, down) => { if (typeof window.isaacInjectKey === 'function') window.isaacInjectKey(name, down); },
   log: (line) => console.log(line),
-  actions: { export: exportSlot, import: importSlot },
+  // MODS: the way into the mods menu when the game's own list has no IMPORT MOD
+  // row to press Enter on, which is any save with no mods of its own. modsMenu is
+  // built further down; this runs when the row is chosen, long after.
+  actions: { export: exportSlot, import: importSlot, mods: () => modsMenu.open() },
 });
 window.isaacEditFile = (slot) => { editMenu.open(slot); };
 window.isaacEditFileDelete = -1;
@@ -471,6 +485,7 @@ const modsMenu = createModsMenu({
   paper: modsPaper,
   log: (line) => console.log(line),
   catalogueBase: params.get('catalogue') || (typeof window !== 'undefined' ? window.isaacModCatalogue : null) || null,
+  onInstalled: enableModsInOptions,
 });
 hooks.onModImport = () => { modsMenu.open(); };
 window.isaacModsMenu = modsMenu;                          // the drivers look at it too
@@ -538,6 +553,33 @@ async function seedDefaultOptions() {
   const bytes = new TextEncoder().encode(DEFAULT_OPTIONS);
   try { await writeSaves(db, [{ key: OPTIONS_KEY, src: null, bytes }], false); } catch { return 'write failed'; }
   return 'written';
+}
+
+// Round 82: installing a mod turns EnableMods on, once. A page that visited
+// before round 81 wrote EnableMods=0 into its options and kept it: the mod is
+// seeded, the engine lists it and nothing happens, which is the least obvious
+// failure there is. Choosing to install one is choosing to have mods on. The
+// game's own TAB on the mods screen still wins afterwards -- this only ever
+// fires on an install.
+async function enableModsInOptions() {
+  let db = null;
+  try { db = await openStore(); } catch { return 'no store'; }
+  if (!db) return 'no store';
+  const cur = await new Promise((resolve) => {
+    try {
+      const req = db.transaction(SAVE_STORE, 'readonly').objectStore(SAVE_STORE).get(OPTIONS_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    } catch { resolve(null); }
+  });
+  if (!cur || !cur.bytes) return 'no options yet';       // seedDefaultOptions writes EnableMods=1
+  const text = new TextDecoder().decode(cur.bytes);
+  if (!/^EnableMods=0\s*$/m.test(text)) return 'already on';
+  const next = text.replace(/^EnableMods=0[ \t]*$/m, 'EnableMods=1');
+  try { await writeSaves(db, [{ key: OPTIONS_KEY, src: null, bytes: new TextEncoder().encode(next) }], false); }
+  catch { return 'write failed'; }
+  console.log('[mods] EnableMods was off in this browser\'s options; a mod was installed, so it is on now');
+  return 'turned on';
 }
 
 // ---- the saves menu ------------------------------------------------------------------
@@ -666,6 +708,6 @@ try {
 } catch (e) { console.warn('[isaac] default options not written:', e.message); }
 
 // ---- go: the pipeline runs to the end of main; this import resolves when it does
-setStatus('loading\u2026');
+setStatus('loading');
 stages.module.received = 0;
 import('./boot_web.mjs').catch((e) => showError('The pipeline failed', e.message));

@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-06, recomp rounds 26-80: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-82: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -181,6 +181,17 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 82: the row that cost the achievements, and two quiet failures** (§21.96).
+  Round 81's unlock patch did not clear the indicator because the gate was
+  upstream of it: `mods/ import mod/` **is a mod**, so every run was a modded
+  run on a save with nothing installed. It is seeded only once the player has a
+  mod of their own; with none the way in is the EDIT FILE menu's **MODS** row,
+  which is the page's own and costs no mod. **EnableMods=0** was the quietest
+  failure yet -- round 76's default, kept because options are written once, so
+  the mod imported, seeded, listed, and never ran; installing one turns it on
+  now. A download reports bytes rather than finished parts (a one-part 19 MB mod
+  showed nothing at all), and the loading screen is black, one segmented bar and
+  one line in caps, with the stages under `?stats=1`.
 - **Round 81: the row nobody could reach, and the byte that stopped the unlocks** (§21.95).
   Round 77b's mod browser shipped twice unreachable: the MOD BROWSER row is
   offered only with a catalogue base and no build ever carried one.

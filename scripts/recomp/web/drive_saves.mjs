@@ -82,6 +82,16 @@ const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
 const keyOf = (n) => SAVE_DIR + `persistentgamedata${n}.dat`;
 const lookalikes = (all, n) => all.filter((it) => new RegExp(`persistentgamedata${n}\\.dat$`, 'i').test(it.key)).map((it) => `${it.key} (${it.bytes.length} B)`).join('; ');
 const diff = (a, b) => { if (a.length !== b.length) return `lengths ${a.length} vs ${b.length}`; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return `first difference at ${i}: ${a[i]} vs ${b[i]}`; return 'same'; };
+// a row of that menu by name: its entries are not always the same four (round 82
+// put MODS between DELETE FILE and BACK), and counting presses walked into it
+const toRow = async (label) => {
+  for (let i = 0; i < 8; i++) {
+    const at = await page.evaluate(() => (window.isaacEditFileMenu ? window.isaacEditFileMenu.current() : null)).catch(() => null);
+    if (at === label) return true;
+    await hold('ArrowDown'); await sleep(160);
+  }
+  return false;
+};
 // the way in to the EDIT FILE menu for the file the cursor is on
 const openMenuOnFile = async (rightPresses, what) => {
   for (let i = 0; i < rightPresses; i++) { await hold('ArrowRight'); await sleep(400); }
@@ -134,13 +144,15 @@ try {
   check(metaDoc && metaDoc.format === 'isaac-recomp-saves/1' && metaDoc.slot === 1 && Array.isArray(metaDoc.files) && metaDoc.files.length === 1, 'the manifest names slot 1 and its file', metaDoc ? JSON.stringify(metaDoc.files) : 'no manifest');
   await sleep(600);
   await page.screenshot({ path: join(OUT, 'exported.png') });
-  // BACK
-  for (let i = 0; i < 3; i++) { await hold('ArrowDown'); await sleep(150); }
+  // BACK, walked to by name: round 82 put MODS between DELETE FILE and it, and
+  // three Downs landed on that instead -- which opened the mods menu over the top
+  // and ate every key after it
+  await toRow('BACK');
   await hold('Enter'); await sleep(500);
   check(!(await state()).open, 'BACK closes the menu');
   // --- IMPORT the zip into file 2
   if (!(await openMenuOnFile(1, 'file 2'))) throw new Error('no menu on file 2');
-  await hold('ArrowDown'); await sleep(200);                  // IMPORT FILE
+  await toRow('IMPORT FILE');
   const reloadPromise = page.waitForNavigation({ waitUntil: 'load', timeout: 30000 });
   await hold('Enter');
   const chooser = await nextChooser(15000);

@@ -31,6 +31,13 @@
 //                folder. That write comes back to the page through the FS shim's
 //                persist hook, and the page opens this menu instead.
 //
+//                Round 82: it is seeded only once the player has a mod of their
+//                own. A mod loaded is a modded run, and a modded run is one the
+//                game will not give achievements for -- so a row that existed to
+//                offer an import was quietly costing the unlocks of a player who
+//                had installed nothing. With no mods the way in is the EDIT FILE
+//                menu's MODS row, which is the page's own and costs nothing.
+//
 // On enabled and disabled: the engine writes `disable.it` when a mod is toggled
 // off in its own list and greys the row, but it does not read that file back at
 // the next start -- measured, with the fs layer tracing, under both of the mods
@@ -313,11 +320,32 @@ export async function fetchCatalogue(base) {
 export async function fetchMod(base, entry, onProgress) {
   const root = String(base).replace(/\/$/, '');
   const parts = [];
+  // Round 82: in bytes, not in parts. A mod that is one 19 MB part reported
+  // nothing until it had arrived, which is a menu that looks hung. The body is
+  // read as a stream and every chunk moves the number; the total is the size the
+  // catalogue already carries, so it is known before the first byte.
+  let got = 0;
+  const want = entry.bytes || 0;
   for (let i = 0; i < entry.parts; i++) {
     const r = await fetch(`${root}/m/${entry.id}.${i}.bin`);
     if (!r.ok) throw new Error(`part ${i + 1} of ${entry.parts} answered ${r.status}`);
-    parts.push(new Uint8Array(await r.arrayBuffer()));
-    if (onProgress) onProgress(i + 1, entry.parts);
+    if (!r.body || !r.body.getReader) {                 // no streams: one lump, one report
+      const b = new Uint8Array(await r.arrayBuffer());
+      parts.push(b); got += b.length;
+      if (onProgress) onProgress(got, want);
+      continue;
+    }
+    const reader = r.body.getReader(), piece = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      piece.push(value); got += value.length;
+      if (onProgress) onProgress(got, want);
+    }
+    const n = piece.reduce((a, p) => a + p.length, 0), one = new Uint8Array(n);
+    let at0 = 0;
+    for (const p of piece) { one.set(p, at0); at0 += p.length; }
+    parts.push(one);
   }
   const total = parts.reduce((n, p) => n + p.length, 0);
   const out = new Uint8Array(total);
@@ -336,13 +364,17 @@ export async function fetchMod(base, entry, onProgress) {
 export async function seedMods(db, seed, log, opts) {
   const o = opts || {};
   const out = { mods: 0, files: 0, bytes: 0, skipped: 0, state: 0, off: 0 };
-  if (o.sentinel !== false) {
+  const index = db ? await listMods(db) : [];
+  const on = index.filter((m) => m.enabled !== false);
+  // Round 82: the import row is a mod, and a mod loaded is a modded run -- which
+  // turned the achievement indicator on for a player who had installed nothing.
+  // It is seeded only once there is a mod of the player's own, by which point the
+  // run is modded anyway. With none, the way in is the EDIT FILE menu.
+  if (o.sentinel !== false && on.length) {
     const meta = new TextEncoder().encode(IMPORT_METADATA);
     for (const root of GUEST_ROOTS) if (seed(`${root}${IMPORT_DIR}/metadata.xml`, meta)) out.files += 1;
   }
   if (!db) return out;
-  const index = await listMods(db);
-  const on = index.filter((m) => m.enabled !== false);
   const known = new Set(on.map((x) => x.id));
   out.off = index.length - on.length;
   const byId = new Map();
@@ -386,7 +418,7 @@ export async function seedMods(db, seed, log, opts) {
 
 const mib = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
-// opts: { paper, log, catalogueBase }
+// opts: { paper, log, catalogueBase, onInstalled() }
 // `paper` is createPaperMenu(...) from menu_overlay.mjs: the game's own paper,
 // font, cursor and sounds. The two file inputs are the only DOM here, because a
 // file picker cannot be opened from a canvas.
@@ -395,6 +427,7 @@ export function createModsMenu(opts) {
   const log = o.log || (() => {});
   const paper = o.paper;
   let db = null, mods = [], catalogue = null, message = null, dirty = false, busy = false;
+  let progress = null, busyId = null;        // per cent of the mod being downloaded, and which
   let view = 'installed';                      // or 'browse'
   let search = '';
 
@@ -437,6 +470,10 @@ export function createModsMenu(opts) {
     if (dropped.length) notes.push(`${dropped.length} path(s) dropped`);
     await refresh();
     if (mods.reduce((n, x) => n + x.bytes, 0) > SEED_BUDGET) notes.push(`over the ${mib(SEED_BUDGET)} budget`);
+    // Round 82: installing a mod is choosing to have mods on. A page that ran
+    // before round 81 wrote EnableMods=0 and kept it, so the mod was seeded, the
+    // engine listed it, and nothing happened -- the quietest failure there is.
+    if (o.onInstalled) { try { await o.onInstalled(); } catch (e) { log(`[mods] the options: ${e.message}`); } }
     say(`${mod.name}: ${files.length} file(s)${notes.length ? ', ' + notes.join(', ') : ''}`, true);
   }
 
@@ -488,10 +525,21 @@ export function createModsMenu(opts) {
     try {
       db = db || await openModDb();
       if (db && await getMod(db, entry.id)) throw new Error('already installed');
-      const zip = await fetchMod(o.catalogueBase, entry, (i, n) => {
-        message = `${entry.name}: ${i} OF ${n}`.toUpperCase().slice(0, 44);
+      // the row carries the percentage while it downloads, the line says what for
+      busyId = entry.id;
+      progress = 0;
+      message = 'DOWNLOADING...';
+      paper.redraw();
+      const zip = await fetchMod(o.catalogueBase, entry, (n, total) => {
+        const pct = total ? Math.min(100, Math.round(100 * n / total)) : 0;
+        if (pct === progress) return;                    // a redraw a frame is plenty
+        progress = pct;
         paper.redraw();
       });
+      progress = null;
+      busyId = null;
+      message = 'UNPACKING...';
+      paper.redraw();
       await install(await unzip(zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength)), entry.name);
     } catch (e) { say(`${entry.name}: ${e.message}`); }
     busy = false;
@@ -506,7 +554,8 @@ export function createModsMenu(opts) {
         !q || m.name.toLowerCase().includes(q) || (m.description || '').toLowerCase().includes(q));
       const rows = list.map((m) => ({
         label: m.name,
-        note: have.has(m.id) ? 'INSTALLED' : (m.bytes > SEED_BUDGET ? 'TOO BIG' : mib(m.bytes)),
+        note: busyId === m.id && progress != null ? `${progress}%`
+          : have.has(m.id) ? 'INSTALLED' : (m.bytes > SEED_BUDGET ? 'TOO BIG' : mib(m.bytes)),
         dim: have.has(m.id) || m.bytes > SEED_BUDGET,
         action: () => (have.has(m.id) ? say(`${m.name} is already installed`) : add(m)),
       }));

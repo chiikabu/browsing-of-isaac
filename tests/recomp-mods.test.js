@@ -1,4 +1,4 @@
-﻿// recomp-mods.test.js -- mods imported from the device (round 74).
+// recomp-mods.test.js -- mods imported from the device (round 74).
 //
 // The parts that are quiet when they break: a path out of an archive that lands
 // somewhere it should not, a mod that goes into the save store, a zip with the
@@ -291,4 +291,70 @@ test('round 81: unlocks are not gated on mods being off', () => {
   assert.match(patches, /LIFT-PATCH 0x009299e4 \(round 81\)/, 'and carries its marker, which is what makes it idempotent');
   // the old text has to be what the lifter actually emits, or the patch is a no-op
   assert.match(patches, /ub900_1 = MEMR8\(u3300_4\);/, 'the text it replaces');
+});
+
+test('round 82: the import row is not seeded until the player has a mod', () => {
+  // It is a mod, and a mod loaded is a modded run -- which the game will not
+  // give achievements for. So a row that existed only to offer an import was
+  // costing the unlocks of a player who had installed nothing.
+  const mods = readFileSync(join(root, 'scripts', 'recomp', 'web', 'mods.mjs'), 'utf8');
+  assert.match(mods, /if \(o\.sentinel !== false && on\.length\) \{/);
+  // and `on` has to be known before that test, not after it
+  const seed = mods.slice(mods.indexOf('export async function seedMods'));
+  assert.ok(seed.indexOf('const on = index.filter') < seed.indexOf('o.sentinel !== false && on.length'),
+    'the installed mods are counted before the sentinel is decided');
+  // the way in with no mods: the page's own file menu
+  const ov = readFileSync(join(root, 'scripts', 'recomp', 'web', 'menu_overlay.mjs'), 'utf8');
+  assert.match(ov, /actions\.mods \? \['EXPORT FILE', 'IMPORT FILE', 'DELETE FILE', 'MODS', 'BACK'\]/);
+  assert.match(ov, /if \(rows\[i\] === 'MODS'\) \{ play\('select'\); close\(null\); actions\.mods\(\); return; \}/);
+  assert.match(ov, /if \(rows\[i\] === 'BACK'\) \{ close\('back'\); return; \}/, 'BACK is found by name, not by index');
+  const play = readFileSync(join(root, 'scripts', 'recomp', 'web', 'play.mjs'), 'utf8');
+  assert.match(play, /mods: \(\) => modsMenu\.open\(\)/);
+  // the paper grows with the entries rather than clipping the fifth
+  assert.match(ov, /const sh = sh0 \+ 24 \+ \(items\(\)\.length - 4\) \* 17/);
+});
+
+test('round 82: a mod being downloaded reports bytes, not parts', () => {
+  // onProgress fired once a part had finished, so a mod that is one 19 MB part
+  // showed nothing at all until it arrived: a menu that looks hung
+  const mods = readFileSync(join(root, 'scripts', 'recomp', 'web', 'mods.mjs'), 'utf8');
+  assert.match(mods, /const reader = r\.body\.getReader\(\), piece = \[\];/);
+  assert.match(mods, /piece\.push\(value\); got \+= value\.length;/);
+  assert.match(mods, /if \(onProgress\) onProgress\(got, want\);/);
+  assert.match(mods, /const want = entry\.bytes \|\| 0;/, 'the total is the size the catalogue carries');
+  assert.match(mods, /if \(!r\.body \|\| !r\.body\.getReader\)/, 'and a browser without streams still gets one report');
+  // shown on the row it belongs to
+  assert.match(mods, /note: busyId === m\.id && progress != null \? `\$\{progress\}%`/);
+});
+
+test('round 82: the loading screen is the bar and one line', () => {
+  const html = readFileSync(join(root, 'scripts', 'recomp', 'web', 'play.html'), 'utf8');
+  const play = readFileSync(join(root, 'scripts', 'recomp', 'web', 'play.mjs'), 'utf8');
+  // the stages, the byte counts and the machine string are instruments now
+  assert.match(play, /const STATS = params\.get\('stats'\) === '1';/);
+  assert.match(play, /if \(STATS\) \{ \$\('fps'\)\.hidden = false; \$\('stages'\)\.hidden = false; \}/);
+  assert.match(play, /statusEl\.textContent = STATS && detail \? detail : text;/);
+  assert.match(play, /setStatus\('loading', name\);/, "the engine's stage names are the detail, not the line");
+  // and the look: square corners, the menu's bone white, pips rather than a fill
+  assert.match(html, /--load: #d7c9a7; --load-dim: #7d7263;/);
+  assert.match(html, /repeating-linear-gradient\(90deg, var\(--load\) 0 3px, transparent 3px 5px\)/);
+  assert.ok(!/#bar \{[^}]*border-radius/.test(html), 'nothing in this game is rounded');
+});
+
+test('round 82: installing a mod turns mods on in the stored options', () => {
+  // Round 76 made EnableMods=0 the default and options are written once and then
+  // kept, so a browser that visited since has carried it: the mod imports, the
+  // page seeds it, the engine lists it, and the mod manager never runs it.
+  // Nothing errors anywhere, which is what made it hard to see.
+  const play = readFileSync(join(root, 'scripts', 'recomp', 'web', 'play.mjs'), 'utf8');
+  assert.match(play, /async function enableModsInOptions\(\)/);
+  assert.match(play, /if \(!\/\^EnableMods=0\\s\*\$\/m\.test\(text\)\) return 'already on';/,
+    'a browser that already has them on is left alone');
+  assert.match(play, /text\.replace\(\/\^EnableMods=0\[ \\t\]\*\$\/m, 'EnableMods=1'\)/);
+  assert.match(play, /onInstalled: enableModsInOptions,/);
+  // and it fires on an install, not on every boot: the game's own TAB has to win
+  const mods = readFileSync(join(root, 'scripts', 'recomp', 'web', 'mods.mjs'), 'utf8');
+  const install = mods.slice(mods.indexOf('async function install('), mods.indexOf('async function install(') + 1400);
+  assert.match(install, /if \(o\.onInstalled\) \{ try \{ await o\.onInstalled\(\); \}/);
+  assert.equal((mods.match(/o\.onInstalled/g) || []).length, 2, 'only the install path calls it');
 });
