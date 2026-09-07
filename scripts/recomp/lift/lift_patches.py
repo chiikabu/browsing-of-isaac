@@ -143,9 +143,14 @@ L_00a2b5c2: ;
   s->PF = PF;
   recomp_jmp_target = ZF ? 0xa2b5e1u : 0xa2b5c8u; recomp_jmp_pending = 1u; return;
 """),
+    # Round 86b: this used to anchor on `RECOMP_VA(0xa2b5c7u);`. Adding the 117
+    # code-pointer-only functions (orphan_starts.py) repartitioned the TUs, and
+    # 0xa2b5c7 gained an `L_00a2b5c7: ;` label between that line and the body --
+    # so the match failed and the build stopped. The anchor is the sbb sequence
+    # itself now, which is unmistakable and carries no label of its own; what
+    # the lifter emits before it is left alone.
     ("0x00a2b5c8",
-     """  RECOMP_VA(0xa2b5c7u);
-  u3400_4 = (uint32_t)(EBX + ((uint32_t)0xc985104du));
+     """  u3400_4 = (uint32_t)(EBX + ((uint32_t)0xc985104du));
   u24700_4 = (uint32_t)CF;
   u5280_4 = MEMR32(u3400_4);
   CF = (uint8_t)(u5280_4 < ECX);
@@ -170,8 +175,7 @@ L_00a2b5c2: ;
   PF = (uint8_t)(u24e00_1 == ((uint8_t)0x0u));
   RECOMP_VA(0xa2b5cdu);
 """,
-     """  RECOMP_VA(0xa2b5c7u);
-  /* LIFT-PATCH 0x00a2b5c8: Ghidra started this orphaned tail one byte early
+     """  /* LIFT-PATCH 0x00a2b5c8: Ghidra started this orphaned tail one byte early
      (0x19 is the rel8 of the pristine `je` at 0xa2b5c6) and decoded an `sbb`
      that swallowed `mov ecx, [ebp+0x10]; test ecx, ecx`. Re-decoded from
      0xa2b5c8, which sub_00a2b1e0's restored branch enters. */

@@ -7363,3 +7363,66 @@ that does not parse, on a path that degrades quietly to a slower one. The
 invariant is now a test that cooks the template and parses the result as the
 classic script a Worker is handed, and asserts the template holds no backslash
 at all -- the class, not the instance.
+
+### 21.101 Round 86b: the functions only a mod ever calls
+
+A mod installed through the menu ran its `main.lua` and the module stopped:
+
+    [isaac][TRAP] indirect call to 0x0086fc60 from 0x00898e8b resolves to
+                  neither a host shim nor a lifted function. It is inside the
+                  image, so the function was not lifted.
+    [isaac] reason: unresolved indirect call
+    TRAP in main @ 0x00931050: Program terminated with exit(1)
+
+0x0086fc60 is two instructions -- `mov eax, dword ptr [0xc71678]; ret` -- an
+inline getter MSVC emitted out of line only because somebody took its address.
+**Nothing calls it.** Its only two references are immediates:
+`push 0x86fc60` at 0x0086dd24, and `mov dword ptr [eax], 0x86fc60` at
+0x00895ce6, which stores it into the Lua userdata that the binding at
+0x00898e70 later calls through (`call [0xb183b0]; mov eax,[eax]; call eax`).
+With no call to find it, Ghidra never made a function of it, so it was in none
+of the inventories the lifter reads, so it was never lifted. The game itself
+never needs it. A mod does, and that is why 85 rounds went by without it.
+
+The class matters more than the instance, so the census is by shape rather than
+by address. `scripts/recomp/lift/orphan_starts.py` asks the PE index for every
+address escape (`kind = 'addr'`) that lands in .text -- 5,029 distinct targets
+-- and makes each earn its place: an instruction the index decoded, 16-byte
+aligned, preceded by the int3 padding that separates functions here, and inside
+no function the lift already knows.
+
+That last test is load-bearing rather than tidy. `func_starts` feeds
+`discover_body`: a jump to a known start is lifted as a tail call instead of
+being absorbed, so a start invented INSIDE an existing function would change
+how that function is lifted. It is *strictly* inside, because a function that
+merely BEGINS at the candidate is evidence for it, not against -- the first
+attempt got that backwards and reported zero candidates, including the one
+address already known to be real.
+
+    address escapes     : 5029 distinct targets in .text
+      already a start   : 2931
+      not 16-aligned    : 1544
+      not an instruction: 14
+      no int3 before it : 26
+      inside a function : 397
+    orphan functions    : 117
+
+All 117 are one-line accessors -- `mov eax,[ecx+disp]; ret`,
+`lea eax,[ecx+disp]; ret`, `fld [ecx+disp]; ret`, `inc/dec [ecx+disp]; ret`,
+two `jmp` thunks -- and all 117 are functions the index recovered bounds for on
+its own. The lift goes from 26,241 starts to 26,358, and 23,238 lifted
+functions to 23,353; the dispatcher's index from 23,245 entries to 23,362.
+
+One thing broke on the way and is worth recording, because it will happen
+again to anyone who adds starts: the new entries repartitioned the TUs, and
+0xa2b5c7 gained an `L_00a2b5c7: ;` label between `RECOMP_VA(0xa2b5c7u);` and
+the body -- so round 24e's block patch, which anchored on that RECOMP_VA line,
+stopped matching and the build refused to continue. Anchoring a block patch on
+a RECOMP_VA line is anchoring on the one line a label can appear in front of.
+It anchors on the sbb sequence itself now.
+
+Verified with the mod that found it (The Specialist for Good Items, 59 files,
+installed through the page's own import): `Running Lua Script:
+//mods/specialistforgooditems/main.lua`, then the intro cutscene, then
+`Menu Bestiary Init` -- the title menu, where before it exited at the Lua line.
+Family 4105 pass / 0 fail, mods 37/37, saves 15/15, EDIT FILE 11/11.

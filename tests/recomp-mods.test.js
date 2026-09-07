@@ -438,3 +438,39 @@ test('round 85: a mod\'s Lua is put where the host Lua reads', () => {
   assert.match(b, /if \(ok\) memfs\(path, bytes\);/, 'written for a file that seeded');
   assert.match(b, /lua into MEMFS/, 'and the stage says how many');
 });
+
+test('round 86b: the lifter is given the functions only a code pointer reaches', () => {
+  // A mod called Isaac.GetCostumeIdByPath and the port stopped with
+  //   indirect call to 0x0086fc60 from 0x00898e8b resolves to neither a host
+  //   shim nor a lifted function. It is inside the image, so it was not lifted.
+  // 0x0086fc60 is `mov eax,[0xc71678]; ret` -- an inline getter MSVC emitted
+  // out of line only because its address was taken. Nothing calls it, so
+  // Ghidra never made a function of it and no inventory the lifter reads had
+  // it. The game never needs it; a mod does.
+  const p = readFileSync(join(root, 'scripts', 'recomp', 'lift', 'orphan_starts.py'), 'utf8');
+  assert.match(p, /kind = 'addr'/, 'the census reads the index address escapes');
+  assert.match(p, /dst % 16/, '16-byte aligned, as MSVC aligns entries here');
+  assert.match(p, /mnem\.get\(prev\) == "int3"/, 'preceded by the padding that separates functions');
+  // strictly-inside is the load-bearing one: func_starts feeds discover_body,
+  // so a start invented INSIDE an existing function would change how that
+  // function is lifted. A function that BEGINS at the candidate is evidence for.
+  assert.match(p, /extents\[i\]\[0\] < va < extents\[i\]\[1\]/,
+    'the coverage test is strictly inside, so a function that starts there still counts');
+  assert.match(p, /0x0086fc60/, 'and it records the address that found the class');
+});
+
+test('round 86b: the sound-manager block patch does not anchor on a line that can gain a label', () => {
+  // Adding those functions repartitioned the TUs and 0xa2b5c7 gained an
+  // `L_00a2b5c7: ;` label, which sat between `RECOMP_VA(0xa2b5c7u);` and the
+  // body the patch matched -- so the match failed and the build stopped. The
+  // anchor is the sbb sequence now, which carries no label of its own.
+  const patches = readFileSync(join(root, 'scripts', 'recomp', 'lift', 'lift_patches.py'), 'utf8');
+  const at = patches.indexOf('("0x00a2b5c8"');
+  assert.ok(at > 0, 'the patch is registered');
+  const old = patches.slice(at, at + 400);
+  const firstLine = old.split('\n').find((l, i) => i > 0 && l.trim());
+  assert.ok(!/RECOMP_VA\(0xa2b5c7u\)/.test(firstLine),
+    'the old text does not start at the line a label can precede');
+  assert.match(firstLine, /u3400_4 = \(uint32_t\)\(EBX \+ \(\(uint32_t\)0xc985104du\)\);/,
+    'it starts at the sbb sequence instead');
+});

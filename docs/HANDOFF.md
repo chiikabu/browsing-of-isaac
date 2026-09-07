@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-06, recomp rounds 26-86: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-86b: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -181,6 +181,20 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 86b: the functions only a mod ever calls** (§21.101).
+  A mod's `main.lua` ran and the module stopped: `indirect call to 0x0086fc60
+  ... was not lifted`. That address is `mov eax,[0xc71678]; ret`, an inline
+  getter emitted out of line because somebody took its address -- **nothing
+  calls it**, so Ghidra never made a function of it and the lifter never saw
+  it. The game does not need it; a mod does.
+  `scripts/recomp/lift/orphan_starts.py` censuses the class instead of the
+  address: every `kind='addr'` escape into .text that is 16-aligned, int3
+  preceded, an instruction boundary, and **strictly** outside every known
+  function -- **117**, all one-line accessors. Starts 26,241 -> 26,358, lifted
+  23,238 -> 23,353, dispatch 23,245 -> 23,362. Adding starts repartitions the
+  TUs: 0xa2b5c7 gained a label and round 24e's block patch, anchored on a
+  `RECOMP_VA` line, stopped matching -- never anchor a block patch there.
+  The mod now reaches the title menu. Family **4105**, mods 37/37, saves 15/15.
 - **Round 86: the two characters the template ate** (§21.100).
   `Uncaught SyntaxError: Unexpected token 'if'` -- reported twice, checked twice,
   found nothing, because both checks read the template's **source text**. The
