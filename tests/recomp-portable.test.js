@@ -340,3 +340,16 @@ test('round 86d: a chunk carries a token from its own bytes into its URL', () =>
   assert.match(p, /\.bin' \+ \(v \? '\?v=' \+ v : ''\)/, 'the URL carries the token');
   assert.match(p, /var v = S\[s\]\.v && S\[s\]\.v\[i\];/, 'read out of the stream the chunk belongs to');
 });
+
+test('round 88: the whole-read chunks may be zopfli, and it stays gzip', () => {
+  // Part A is gzipped before it is scrambled, so its wire form is ours. Zopfli
+  // is the same gzip format -- the page still calls DecompressionStream('gzip')
+  // -- for about 0.55 MB across part A and six more minutes of build, which is
+  // why it is a flag. It must never become the default silently.
+  const p = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'portable.py'), 'utf8');
+  assert.match(p, /if not args\.zopfli:\s*\n\s*return gzip\.compress\(b, 9, mtime=0\)/,
+    'gzip -9 stays the default');
+  assert.match(p, /import zopfli\.gzip/, 'and zopfli is imported only when asked for');
+  assert.match(p, /--zopfli needs the zopfli package/, 'with a clear word when it is missing');
+  assert.match(p, /"--zopfli", action="store_true"/, 'it is opt-in');
+});

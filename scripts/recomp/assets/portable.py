@@ -608,9 +608,24 @@ def cmd_chunks(args) -> int:
         key = keystream_key(
             ("isaac-portable/%d/%d/%d" % (a_len, b_len, args.chunks)).encode("ascii"))
 
+    # Round 88: zopfli emits a gzip stream any decoder reads -- the page still
+    # calls DecompressionStream('gzip') and nothing about the runtime changes --
+    # it just spends much longer choosing the encoding. Measured on the module,
+    # the largest thing in part A: 10.98 -> 10.55 MB, 3.9%, for 282 s. Across
+    # part A that is ~0.55 MB for about six minutes of build, which is why it is
+    # a flag and not the default.
+    def _gzip(b):
+        if not args.zopfli:
+            return gzip.compress(b, 9, mtime=0)
+        try:
+            import zopfli.gzip
+        except ImportError:
+            raise SystemExit("--zopfli needs the zopfli package (pip install zopfli)")
+        return zopfli.gzip.compress(b)
+
     def emit_for(tag, gz, size):
         def emit(i, b):
-            body = gzip.compress(b, 9, mtime=0) if gz else b
+            body = _gzip(b) if gz else b
             body = scramble(body, i * size, key)
             with open(os.path.join(data_dir, "%s%d.bin" % (tag, i)), "wb") as f:
                 f.write(body)
@@ -759,6 +774,10 @@ def main(argv=None) -> int:
                    help="leave the chunks as they are and the page readable (the default scrambles both)")
     p.add_argument("--html-only", action="store_true",
                    help="rewrite the page without touching the chunk files (the probe, not the payload)")
+    p.add_argument("--zopfli", action="store_true",
+                   help="compress the whole-read chunks with zopfli instead of gzip -9 -- the same "
+                        "gzip format the page already decodes, ~0.55 MB smaller, ~6 minutes slower "
+                        "to build (round 88)")
     p.add_argument("--key-b64", help="scramble with this key instead of one derived from the sizes, so "
                                      "chunks that did not change keep the bytes already uploaded")
     p.add_argument("--key-of", help="take --key-b64 out of an earlier build's index.html")

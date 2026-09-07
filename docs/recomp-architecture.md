@@ -7640,6 +7640,24 @@ saves 15/15, EDIT FILE 11/11. And the A/B that matters, at a 4x CPU throttle:
 Same boot, same windows, the frame rate if anything better -- which is what a
 smaller archive with an unchanged block type should do.
 
+**And what the whole-read half is worth.** Part A -- the module, the memory
+image, the small files -- is gzipped by `portable.py` before it is scrambled, so
+its wire form is ours to choose. Zopfli emits a gzip stream any decoder reads
+(the page still calls `DecompressionStream('gzip')`, and a round trip through
+that exact API was checked), it simply spends much longer choosing:
+
+    boot.wasm        10.98 -> 10.55 MB   (-3.9%)   282 s instead of 5
+    isaac.segs.bin    3.61 ->  3.50 MB   (-3.0%)    35 s instead of 1
+    graphics.a        at entropy: 0.0%
+
+About 0.55 MB across part A for roughly six minutes of build, which is why
+`portable.py chunks --zopfli` is a flag and not the default.
+
+The module itself has nothing left to give at this constraint: 97.0% of its
+49.30 MB is the code section and the name section is 0.38 MB, so there is no
+debug weight to strip, and the flags that would shrink the code are the ones
+that would slow it down.
+
 What was measured and left alone: brotli over the windowed chunks (94% on
 afterbirthp, ~19 MB, but it needs a decoder in the page and a decompress on
 every window read); duplicate entry content (3.09 MB across 11,364 entries, and
