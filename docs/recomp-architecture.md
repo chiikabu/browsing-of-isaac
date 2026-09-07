@@ -7537,3 +7537,48 @@ id of its own to add.
 
 The page polls four bytes every 200 ms. The address is in the game's own data,
 so it does not move when this project rebuilds.
+
+### 21.104 Round 87b: a correlate is not a variable
+
+The credit shipped reading a word of .data at 0x00c79970, which had tracked the
+screen perfectly for a whole session: 8 the intro, 9 the title, 11 the file
+select, 14 the paper, 29 a run. On another machine the same paper reported
+**15**, so the credit never appeared and the reporter was told three times to
+clear their cache. They were right and the signal was wrong.
+
+The PE index says why in one line:
+
+    writers 0x00c79970 -> 1 site:  mov dword ptr [0xc79970], 0
+    readers 0x00c79970 -> 1 site:  cmp dword ptr [0xc79970], 0
+
+One read, one write, both against zero. It is a flag; the values that walked so
+convincingly were written by some pointer store that lands across it. It had
+never been a menu id at all. **A word found by diffing snapshots is a
+correlate. It becomes a variable only when code is shown to treat it as one** --
+and that check costs two queries.
+
+Re-filtering the same candidate list by "how much code touches this address"
+returned five words, none of which changed between menu screens: the menus are
+heap objects and nothing about the screen is written by absolute address. The
+answer was one call site away instead:
+
+    0x009085e0  mov dword ptr [0xc72a20], eax     ; MenuManager*
+    0x009085e5  call 0x987450                     ; MenuManager::Init
+    0x009085ea  mov ecx, dword ptr [0xc72a20]
+    0x009085f0  cmp dword ptr [ecx + 0x40], 0     ; and the field it tests
+
+So `MenuManager*` is at **0x00c72a20** and the screen is the dword at **+0x40**
+-- an object the code names and a field the code reads. Diffing that object's
+first 0x200 bytes across screens (the same technique, now anchored) gave the
+whole map, and it is stable because it is the real thing:
+
+    -1 no manager yet (the intro)   3 THE MENU PAPER    9  stats    16 mods
+     1 title                        5 a run is up      10  options  19 online
+     2 file select                  7 challenges
+
+Which also corrected a claim from the round before: ONLINE **does** open (19).
+The old signal had stayed at "14" when it was entered, and that was read as the
+EOS stubs refusing to let the menu in. The 82 EOS imports are still stubs, but
+the menu itself opens.
+
+The credit is on 3, 7 and 19 -- the paper, challenges and online.

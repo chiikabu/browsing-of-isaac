@@ -396,21 +396,35 @@ window.addEventListener('unhandledrejection', (ev) => showError('The pipeline fa
 
 // ---- which screen the engine is on (round 87) --------------------------------------
 // The credit belongs on the menu paper and nowhere else -- not in a room, not
-// over the intro. The engine keeps the menu it is showing in a word of its own
-// static data, and in this port a guest VA is a wasm address (isaac_g is the
-// identity), so the page can just read it: boot_web's window.isaacGuest.
+// over the intro. In this port a guest VA is a wasm address (isaac_g is the
+// identity), so the page can read the engine's own state: boot_web's
+// window.isaacGuest.
 //
-// Found by snapshotting the static region at each screen from the intro to a
-// run and keeping the words that were small and different every time; this one
-// was the only one that walked cleanly. Confirmed against screenshots:
-//   8 intro cutscene   9 title   11 file select   14 the menu paper
-//   17 challenges      29 a run is up            31 stats
-// The address is in the game's own data, so it does not move when we rebuild.
-const MENU_ID_VA = 0x00c79970;
+// `MenuManager*` is stored at 0x00c72a20 -- the caller writes it there in the
+// instruction before `call MenuManager::Init` (0x00987450, the function that
+// logs every "Menu X Init" line) -- and the menu it is showing is the dword at
+// +0x40, which is the field the engine's own code tests on the next line
+// (`mov ecx,[0xc72a20]; cmp dword ptr [ecx+0x40], 0`). Before the manager
+// exists the pointer is null, which is the intro cutscene.
+//
+//   -1 no manager yet (the intro)   3 THE MENU PAPER    9 stats    16 mods
+//    1 title                        5 a run is up      10 options  19 online
+//    2 file select                  7 challenges
+//
+// The first attempt at this read a loose word of .data that had tracked the
+// screen for a whole session -- and reported a different number on somebody
+// else's machine, because the index says it has exactly one read and one write
+// in the binary, both against 0. It was a flag some pointer write landed near.
+// A correlate found by diffing is not a variable; this one is anchored on an
+// object the code names and a field the code tests.
+const MENU_MGR_PTR = 0x00c72a20, MENU_SCREEN_OFF = 0x40;
 const readMenuId = () => {
   const G = window.isaacGuest;
   if (!G) return -1;
-  try { return G.u32(MENU_ID_VA) | 0; } catch (e) { return -1; }
+  try {
+    const mgr = G.u32(MENU_MGR_PTR);
+    return mgr ? (G.u32(mgr + MENU_SCREEN_OFF) | 0) : -1;
+  } catch (e) { return -1; }
 };
 // four bytes every 200 ms: the credit appears within a frame or two of the
 // paper and is gone the moment a run starts

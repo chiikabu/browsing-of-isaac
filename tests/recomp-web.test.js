@@ -421,8 +421,8 @@ test('round 87: the credit is drawn on the menu paper and nowhere else', () => {
   assert.match(ov, /const CREDIT_TEXT = 'ported by vun';/, 'the text');
   assert.match(ov, /creditEl\.id = 'credit';/, 'its own surface');
   assert.match(ov, /left:1%;bottom:1\.2%/, 'bottom-left');
-  assert.match(ov, /const CREDIT_ON = new Set\(\[14, 17\]\);/,
-    'the paper and the challenges list, and no other screen');
+  assert.match(ov, /const CREDIT_ON = new Set\(\[3, 7, 19\]\);/,
+    'the paper, challenges and online, and no other screen');
   // the same two passes the fps readout uses: a dark shadow, then the white
   assert.match(ov, /drawText\(gg, CREDIT_TEXT, 3, 3, A\.atlas\);/);
   assert.match(ov, /drawText\(gg, CREDIT_TEXT, 2, 2, A\.atlasWhite\);/);
@@ -434,7 +434,14 @@ test('round 87: the credit is drawn on the menu paper and nowhere else', () => {
   // the screen id is read out of the engine's own memory, which this port can
   // do because a guest VA is a wasm address (isaac_g is the identity)
   const play = readFileSync(join(root, 'scripts', 'recomp', 'web', 'play.mjs'), 'utf8');
-  assert.match(play, /const MENU_ID_VA = 0x00c79970;/, 'the word the engine keeps the screen in');
+  // Anchored on an object the code names and a field the code tests. The first
+  // attempt read a loose .data word that had tracked the screen for a whole
+  // session and reported a different number on another machine: the index says
+  // it has one read and one write in the binary, both against 0. A correlate
+  // found by diffing is not a variable.
+  assert.match(play, /const MENU_MGR_PTR = 0x00c72a20, MENU_SCREEN_OFF = 0x40;/,
+    'the manager pointer and the screen field');
+  assert.ok(!/0x00c79970/.test(play), 'and not the word that merely correlated');
   assert.match(play, /editMenu\.setScreen\(readMenuId\(\)\)/, 'and the credit follows it');
   const boot = readFileSync(join(root, 'scripts', 'recomp', 'web', 'boot_web.mjs'), 'utf8');
   assert.match(boot, /window\.isaacGuest = \{/, 'the page can read guest memory');

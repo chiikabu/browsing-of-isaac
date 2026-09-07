@@ -237,11 +237,12 @@ export function createEditFileMenu(opts) {
     drawText(gg, text, 2, 2, A.atlasWhite);
   };
 
-  // The screen the engine says is up (menu_overlay draws nothing of its own
-  // here; play.mjs reads the id out of guest memory and hands it over). 14 is
-  // the menu paper -- NEW RUN / CONTINUE / ONLINE / CHALLENGES / STATS /
-  // OPTIONS -- and 17 the challenges list; 29 is a run, 8 the intro cutscene.
-  const CREDIT_ON = new Set([14, 17]);
+  // The screen the engine says is up: play.mjs reads MenuManager+0x40 out of
+  // guest memory and hands it over. 3 is the menu paper -- NEW RUN / CONTINUE /
+  // ONLINE / CHALLENGES / STATS / OPTIONS -- with 19 online and 7 challenges,
+  // the three the credit was asked for. 5 is a run, and -1 the intro, before
+  // the manager exists at all.
+  const CREDIT_ON = new Set([3, 7, 19]);
   const drawCredit = () => {
     if (!M.isReady()) return;
     const gg = creditEl.getContext('2d');

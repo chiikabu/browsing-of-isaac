@@ -187,10 +187,16 @@ REQUIRE emsdk on PATH:
   wasm address** (`isaac_g` is the identity), so `window.isaacGuest` lets the
   page read engine variables with no host call and no export -- through HEAPU8,
   since `m.HEAPU32` is not exported and touching it aborts the runtime. The
-  screen id lives at **0x00c79970** and was found by diffing the static region
-  across screens: 8 intro, 9 title, 11 file select, **14 the menu paper**, 17
-  challenges, 29 a run, 31 stats. ONLINE never opens (the id stays 14) because
-  every EOS import is stubbed.
+  screen is `MenuManager+0x40`, with `MenuManager*` at **0x00c72a20** (written
+  in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
+  2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
+  options, 16 mods, 19 online.
+- **Round 87b: a correlate is not a variable** (§21.104). The first version read
+  a .data word that had tracked the screen all session and reported a different
+  number on another machine -- the index shows it has **one read and one write,
+  both against 0**. A word found by diffing snapshots is a correlate; it becomes
+  a variable only when code is shown to treat it as one, and that check is two
+  queries. The real signal was one call site away.
 - **A push is not a deploy.** After every push:
   ode scripts/recomp/assets/check_deployed.mjs\ -- it hashes what the CDN and
   Pages actually serve against what was built here. The module lives in the
