@@ -306,7 +306,11 @@ export function createPaperMenu(opts) {
   // The paper is a torn sheet with a soft edge, so the margin the text keeps is
   // wider than the rect it is drawn into -- SIDE at the sides, TAIL under the
   // last line, both found by looking at it.
-  const PANEL_W = 392, PAD = 16, SIDE = 26, TAIL = 30, MAX_ROWS = 7;
+  // Round 84: the sheet is torn, and its right corner is torn further in than its
+  // left, so anything right-aligned to SIDE sat on the tear or past it -- the
+  // browser's "3/33" was drawn outside the paper entirely. RIGHT is the margin
+  // that side keeps; it is wider than SIDE by exactly what the tear takes.
+  const PANEL_W = 392, PAD = 16, SIDE = 26, RIGHT = 46, TAIL = 30, MAX_ROWS = 7;
   const metrics = () => {
     const lh = Math.max(12, (A.font && A.font.lineHeight) || 16);
     const head = PAD + lh + 4;
@@ -331,11 +335,11 @@ export function createPaperMenu(opts) {
 
     const title = (st.model && st.model.title) || '';
     drawText(g, title, px + (PANEL_W - measure(title)) / 2, py + PAD, A.atlas);
+    // Round 84: there was a "3/33" up here beside the title. The sheet's top-right
+    // corner is torn away, so it was drawn on nothing and read as a number
+    // floating outside the menu -- and the list already says how long it is on the
+    // line at the bottom.
     const n = rows.length;
-    if (n > span) {
-      const more = `${st.cursor + 1}/${n}`;
-      drawText(g, more, px + PANEL_W - SIDE - measure(more), py + PAD, A.atlasLight);
-    }
 
     let top = py + head;
     if (hasSearch) {
@@ -353,9 +357,9 @@ export function createPaperMenu(opts) {
     for (let i = st.top; i < Math.min(n, st.top + span); i++) {
       const row = rows[i], y = top + (i - st.top) * lh;
       const noteW = row.note ? measure(row.note) : 0;
-      const label = clip(row.label, PANEL_W - SIDE * 2 - 14 - (noteW ? noteW + 10 : 0));
+      const label = clip(row.label, PANEL_W - SIDE - RIGHT - 14 - (noteW ? noteW + 10 : 0));
       drawText(g, label, textX, y, i === st.cursor ? A.atlas : (row.dim ? A.atlasLight : A.atlas));
-      if (row.note) drawText(g, row.note, px + PANEL_W - SIDE - noteW, y, A.atlasLight);
+      if (row.note) drawText(g, row.note, px + PANEL_W - RIGHT - noteW, y, A.atlasLight);
       if (i === st.cursor) g.drawImage(A.sheet, cx, cy, cw, ch, (textX - cw - 3) * SCALE, (y + (lh - ch) / 2 - 2) * SCALE, cw * SCALE, ch * SCALE);
     }
     const msg = st.model && st.model.message;

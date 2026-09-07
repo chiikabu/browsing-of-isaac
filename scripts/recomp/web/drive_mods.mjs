@@ -279,12 +279,23 @@ try {
   check(catFiles.join('|') === 'cataloguetestmod/main.lua|cataloguetestmod/metadata.xml',
     'the two parts were joined back into the zip they came from', catFiles.join(' '));
 
-  // back to the installed list -- through the BACK row, not Escape: Escape
-  // closes the whole menu, and a menu closed with a new mod in it reloads the
-  // page (that is how an import reaches the engine's own list).
+  // back to the menu -- through the BACK row, not Escape: Escape closes the whole
+  // menu, and a menu closed with a new mod in it reloads the page (that is how an
+  // import reaches the engine's own list).
   check(await toRow('BACK'), 'the browser has a way back');
   await hold('Enter'); await sleep(600);
-  check(await toRow('Catalogue Test Mod'), 'it is in the installed list now');
+  // Round 84: what is installed is the game's own screen's business. This menu
+  // keeps only what that screen cannot do -- bring a mod in, and take one out.
+  let acts = ((await menu()) || {}).rows || [];
+  check(!acts.includes('Catalogue Test Mod') && !acts.includes('Driver Test Mod'),
+    'the menu does not list what is installed', acts.join(' / '));
+  check(acts.includes('REMOVE MOD'), 'it offers REMOVE MOD instead', acts.join(' / '));
+  check(await toRow('REMOVE MOD'), 'the cursor reaches it');
+  await hold('Enter'); await sleep(600);
+  const rem = await menu();
+  check(rem && rem.title === 'REMOVE MOD' && rem.rows.includes('Catalogue Test Mod'),
+    'and that list is the installed mods', rem ? rem.rows.join(' / ') : 'no menu');
+  check(await toRow('Catalogue Test Mod'), 'the cursor is on the one just installed');
   await hold('KeyX');
   await until(async () => ((await readStores()).index.find((x) => x.id === 'cataloguetestmod') ? null : true),
     10000, 'the catalogue mod being removed again');
@@ -339,6 +350,9 @@ try {
   await page.screenshot({ path: join(OUT, '5-list-without-it.png') });
 
   // remove it from the page's menu, and the save is still there
+  check(await toRow('REMOVE MOD'), 'REMOVE MOD is there with a mod installed');
+  await hold('Enter'); await sleep(600);
+  check(await toRow('Driver Test Mod'), 'the mod is in that list');
   await hold('KeyX'); await sleep(1200);
   const gone = await until(async () => { const m = await message(); return /REMOVED/.test(m) ? m : null; }, 8000, 'the removal').catch(() => '');
   check(/REMOVED/.test(gone), 'removing it says so', gone);

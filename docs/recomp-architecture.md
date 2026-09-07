@@ -7242,3 +7242,43 @@ back by the chunk-counting hook (`stagesEl.hidden = false`), so the one build
 that is not a development build was the one showing every instrument. The bar
 itself was drawn in pips, which reads as a barcode rather than as a bar: it is a
 2px hairline with a solid fill now, over black, with one line in caps under it.
+
+### 21.98 Round 84: the host's ranges are wrong, and not always the same way
+
+    lazy pread FAILED for resources/packed/afterbirthp.a at 227540992+1048576
+
+Round 83 read that as a blip and gave the reader three tries and a whole-chunk
+fallback. It was not a blip. That window is bytes 17825792..18874367 of
+`b14.bin`; fetched **whole**, `b14.bin` on jsDelivr is byte for byte what was
+uploaded, sha256 identical. Fetched as a **range**, the same file comes back with
+different bytes from the very first one, and the host calls it 19,922,984 bytes
+when it is 19,922,944.
+
+Every chunk lies, by a different amount -- +37, +36, +40, +13, +5 -- and not
+consistently: `b28.bin` answered with the right total an hour before it answered
+with a wrong one. That is why round 78's probe let ranges through here. It asks
+once, about one chunk, and a wrong answer is not guaranteed.
+
+So the probe asks about four chunks spread across the stream and every one has to
+be right, and each window's URL carries the chunk's own length in its fragment
+(`#r=a-b@pos!len`) so the Worker and the provider can both check the
+`Content-Range` total against something. A mismatch is refused and the window
+comes from the chunk fetched whole, which is always correct on this host.
+
+**Mods, three ways.** A browser that already had a mod when round 82 landed never
+went through the install path, so its `EnableMods=0` was still there and the mod
+it had was seeded, listed and never run; the page now turns mods on at the first
+boot that finds a mod in the store, once per browser (`isaac-mods-enabled-once`),
+so turning them off in the game afterwards still sticks.
+
+The menu is one row for importing, not two: a file chooser cannot pick a folder
+and a folder chooser cannot pick a file, so IMPORT MOD opens the file chooser and
+a folder or an archive **dropped on the window** goes the same way
+(`entriesFromDrop` walks a dropped directory). What is installed is the game's
+own screen's business and is not listed here any more; REMOVE MOD is where the
+list went.
+
+And the sheet's right corner is torn further in than its left, so a note or a
+counter right-aligned to `SIDE` sat on the tear -- the browser's `3/33` was drawn
+outside the paper altogether. `RIGHT` is the margin that side keeps; the counter
+is gone, because the line at the bottom already says how long the list is.

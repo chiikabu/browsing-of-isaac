@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-06, recomp rounds 26-83: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-84: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -181,6 +181,19 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 84: the host's ranges are wrong, and not always the same way** (§21.98).
+  Round 83 read a failed window as a blip. It was not: fetched whole, a chunk on
+  jsDelivr is byte for byte what was uploaded; fetched as a **range**, the same
+  file comes back with different bytes from the first one and a length **+37,
+  +36, +40, +13, +5** over the truth depending on the chunk -- and not
+  consistently, which is why one probe passed. The probe asks about four chunks
+  now and every one has to be right, and each window carries its chunk's length
+  in the fragment so a mismatched Content-Range is refused for the whole chunk.
+  Mods: **EnableMods is turned on at the first boot that finds one installed**
+  (round 82 only did it on a new install, so a browser that already had a mod
+  kept round 76's 0 and the mod never ran), one **IMPORT MOD** row with a folder
+  or .zip **dropped on the window**, **REMOVE MOD** for the list, and the torn
+  right margin that had the browser's counter drawn outside the paper.
 - **Round 83: one fetch failed and the run ended** (§21.97).
   `lazy pread FAILED ... the reader had no bytes` on the last window of the last
   chunk -- a window the host answers correctly the moment it is asked again. The

@@ -352,7 +352,15 @@ PROVIDER_JS = r"""
     if (!r.ok) throw new Error('range ' + p.s + ':' + p.i + ': HTTP ' + r.status);
     var u = new Uint8Array(await r.arrayBuffer());
     note(p.s, p.i);
-    if (r.status === 206 && u.length === p.take) return unscramble(u, p.i * S[p.s].size + p.within);
+    // the total the host puts in Content-Range has to be the chunk's length: on a
+    // host that answers ranges with the wrong bytes that is the only tell, and the
+    // length of the answer is right even when its contents are not
+    var claim = /\/(\d+)\s*$/.exec(r.headers.get('content-range') || '');
+    var told = claim ? Number(claim[1]) : -1;
+    var mine = chunkLen(p.s, p.i);
+    if (r.status === 206 && u.length === p.take && (mine < 0 || told === mine)) {
+      return unscramble(u, p.i * S[p.s].size + p.within);
+    }
     // Round 83: the answer is not the window that was asked for. A host that
     // ignores Range sends the whole chunk (200, the chunk's length) and that can
     // be sliced; one that answers 206 with the wrong bytes cannot, and slicing it
@@ -412,20 +420,30 @@ PROVIDER_JS = r"""
     if (!P.base) return false;
     var b = S.findIndex(function (st) { return !st.gz; });
     if (b < 0) return false;
-    var want = chunkLen(b, 0);
-    if (want < 0) { ranges = false; P.rangesWhy = 'chunk length unknown'; return false; }
+    // Round 84: four chunks, not one. jsDelivr answers a range with the wrong
+    // bytes and a total a few dozen over the file -- and not consistently: the
+    // same chunk gave the right total an hour before it gave a wrong one. One
+    // question is a coin toss; every one of these has to come back right.
+    var n = count(b), picks = [0, Math.floor(n / 3), Math.floor((2 * n) / 3), n - 1]
+      .filter(function (v, i, a) { return v >= 0 && v < n && a.indexOf(v) === i; });
     try {
-      var r = await fetch(name(b, 0), { headers: { Range: 'bytes=0-63' } });
-      if (r.status !== 206) { ranges = false; P.rangesWhy = 'the host answered ' + r.status + ' for a range'; return false; }
-      var got = (await r.arrayBuffer()).byteLength;
-      var cr = r.headers.get('content-range') || '';
-      var total = /\/(\d+)\s*$/.exec(cr);
-      var claimed = total ? Number(total[1]) : -1;
-      ranges = got === 64 && claimed === want;
-      if (!ranges) {
-        P.rangesWhy = 'the host answered a 64-byte range with ' + got + ' byte(s)'
-          + (claimed >= 0 ? ' and calls the file ' + claimed + ' bytes, not ' + want : ' and sent no Content-Range total');
+      for (var k = 0; k < picks.length; k++) {
+        var i = picks[k], want = chunkLen(b, i);
+        if (want < 0) { ranges = false; P.rangesWhy = 'chunk length unknown'; return false; }
+        var r = await fetch(name(b, i), { headers: { Range: 'bytes=0-63' } });
+        if (r.status !== 206) { ranges = false; P.rangesWhy = 'the host answered ' + r.status + ' for a range'; return false; }
+        var got = (await r.arrayBuffer()).byteLength;
+        var cr = r.headers.get('content-range') || '';
+        var total = /\/(\d+)\s*$/.exec(cr);
+        var claimed = total ? Number(total[1]) : -1;
+        if (got !== 64 || claimed !== want) {
+          ranges = false;
+          P.rangesWhy = 'chunk ' + i + ': a 64-byte range came back as ' + got + ' byte(s)'
+            + (claimed >= 0 ? ' and the host calls that file ' + claimed + ' bytes, not ' + want : ' with no Content-Range total');
+          return false;
+        }
       }
+      ranges = true;
     } catch (e) { ranges = false; P.rangesWhy = e.message; }
     return ranges;
   }
@@ -481,8 +499,10 @@ PROVIDER_JS = r"""
       var p = parts[0];
       // the range rides in the fragment, which no server sees; `@pos` after it is
       // where those bytes start in the stream, which is what unscrambles them
+      // `!len` is the chunk's own length: the Worker has nothing else to check a
+      // Content-Range against, and on this host that check is the whole defence
       return name(p.s, p.i) + '#r=' + p.within + '-' + (p.within + p.take - 1)
-        + '@' + (p.i * S[p.s].size + p.within);
+        + '@' + (p.i * S[p.s].size + p.within) + '!' + chunkLen(p.s, p.i);
     } : null,
     bytesFor: P.base
       ? function (rel, off, len) { var p = locate(rel, off, len); return p ? gather(p) : null; }

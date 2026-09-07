@@ -20,7 +20,7 @@
 const $ = (id) => document.getElementById(id);
 import { createEditFileMenu, createPaperMenu } from './menu_overlay.mjs';
 import { zipStore, unzip } from './zip.mjs';
-import { createModsMenu } from './mods.mjs';
+import { createModsMenu, openModDb, listMods, MODS_DB } from './mods.mjs';
 const ROOT = new URL('.', location.href).pathname.replace(/\/$/, '');
 const params = new URLSearchParams(location.search);
 // The pipeline's defaults: ISAAC_YIELD=1 selects the live page and, with no
@@ -562,6 +562,28 @@ async function seedDefaultOptions() {
 // failure there is. Choosing to install one is choosing to have mods on. The
 // game's own TAB on the mods screen still wins afterwards -- this only ever
 // fires on an install.
+// Is there a mod in the store at all? Read-only, and it does not open the mods
+// database if the browser has none.
+async function anyModInstalled() {
+  if (typeof indexedDB === 'undefined') return false;
+  const dbs = (indexedDB.databases ? await indexedDB.databases().catch(() => null) : null);
+  if (dbs && !dbs.some((d) => d.name === MODS_DB)) return false;
+  let db = null;
+  try { db = await openModDb(); } catch { return false; }
+  if (!db) return false;
+  try { return (await listMods(db)).length > 0; } finally { try { db.close(); } catch { /* gone */ } }
+}
+
+// The one-time flip, remembered in localStorage: turning mods off in the game's
+// own options afterwards has to stick, so this fires once per browser and not at
+// every boot.
+async function enableModsOnce() {
+  try { if (localStorage.getItem('isaac-mods-enabled-once') === '1') return 'done before'; } catch { /* no storage */ }
+  const r = await enableModsInOptions();
+  try { localStorage.setItem('isaac-mods-enabled-once', '1'); } catch { /* no storage */ }
+  return r;
+}
+
 async function enableModsInOptions() {
   let db = null;
   try { db = await openStore(); } catch { return 'no store'; }
@@ -707,6 +729,17 @@ try {
   const seeded = await seedDefaultOptions();
   if (seeded === 'written') console.log('[isaac] options.ini written with the opening prompts accepted');
 } catch (e) { console.warn('[isaac] default options not written:', e.message); }
+
+// Round 84: a browser that already had a mod when round 82 landed never hit the
+// install path, so its EnableMods=0 -- round 76's default, kept because options
+// are written once -- was still there and the mod it had was listed and never
+// run. Once, at the first boot that finds a mod in the store.
+try {
+  if (await anyModInstalled()) {
+    const done = await enableModsOnce();
+    if (done === 'turned on') console.log('[isaac] a mod is installed and this browser had mods off; turned on');
+  }
+} catch (e) { console.warn('[isaac] could not check the mods:', e.message); }
 
 // ---- go: the pipeline runs to the end of main; this import resolves when it does
 setStatus('loading');

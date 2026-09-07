@@ -244,10 +244,15 @@ function start(key, url, len, why, want) {
   // round 70: a portable build points several windows at one large chunk and puts
   // the byte range in the fragment, which no server ever sees. A host that ignores
   // Range sends the whole chunk, so the body is cut to size here.
-  let init, want0 = -1, want1 = -1, at = -1;
+  let init, want0 = -1, want1 = -1, at = -1, chunkBytes = -1;
   const h = url.indexOf('#r=');
   if (h >= 0) {
-    const frag = url.slice(h + 3), cut = frag.indexOf('@');
+    let frag = url.slice(h + 3);
+    // round 84: the tail after ! is the chunk's own length, and a Content-Range
+    // total that is not it means the host is answering with somebody else's bytes
+    const bang = frag.indexOf('!');
+    if (bang >= 0) { chunkBytes = +frag.slice(bang + 1); frag = frag.slice(0, bang); }
+    const cut = frag.indexOf('@');
     const r = (cut < 0 ? frag : frag.slice(0, cut)).split('-');
     want0 = +r[0]; want1 = +r[1];
     if (cut >= 0) at = +frag.slice(cut + 1);        // where these bytes start in the stream
@@ -266,7 +271,14 @@ function start(key, url, len, why, want) {
       if (a) await new Promise((res) => setTimeout(res, 120 * a * a));
       try {
         const r = await fetch(url, init);
-        if (r.ok) return await r.arrayBuffer();
+        if (r.ok) {
+          // the host's own answer says which file it thinks it is serving
+          if (r.status === 206 && chunkBytes > 0) {
+            const m = /\/(\d+)\s*$/.exec(r.headers.get('content-range') || '');
+            if (m && Number(m[1]) !== chunkBytes) { last = 'the host calls that chunk ' + m[1] + ' bytes, not ' + chunkBytes; break; }
+          }
+          return await r.arrayBuffer();
+        }
         last = 'HTTP ' + r.status;
       } catch (e) { last = (e && e.message) || 'fetch failed'; }
     }

@@ -276,6 +276,33 @@ export function planMod(rawEntries, fallback) {
 // One archive, or a directory's worth of files. A File carries
 // webkitRelativePath when it came from the directory picker, which is the only
 // way the browser tells us the shape of what was chosen.
+// A drop carries either: `webkitGetAsEntry` walks a folder, and a lone file
+// comes back as one entry with no slash in its name, which is how the caller
+// tells the two apart. A browser without the API answers null and the caller
+// falls back to the plain file list.
+export async function entriesFromDrop(dt) {
+  const items = dt && dt.items ? Array.from(dt.items) : [];
+  const roots = items.map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null)).filter(Boolean);
+  if (!roots.length) return null;
+  const readDir = (dir) => new Promise((res, rej) => {
+    const r = dir.createReader(), acc = [];
+    const step = () => r.readEntries((batch) => { if (!batch.length) { res(acc); return; } acc.push(...batch); step(); }, rej);
+    step();
+  });
+  const asFile = (e) => new Promise((res, rej) => e.file(res, rej));
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const f = await asFile(entry);
+      out.push({ name: prefix + entry.name, bytes: new Uint8Array(await f.arrayBuffer()) });
+      return;
+    }
+    for (const child of await readDir(entry)) await walk(child, `${prefix}${entry.name}/`);
+  };
+  for (const r of roots) await walk(r, '');
+  return out;
+}
+
 export async function importFrom(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length) throw new Error('nothing chosen');
@@ -290,15 +317,19 @@ export async function importFrom(fileList) {
     return { entries, fallback: top };
   }
   const f = files[0];
-  const buf = await f.arrayBuffer();
-  const kind = archiveKind(new Uint8Array(buf, 0, Math.min(16, buf.byteLength)));
+  return archiveEntries(new Uint8Array(await f.arrayBuffer()), f.name);
+}
+
+// One archive, whatever it arrived as.
+export async function archiveEntries(bytes, name) {
+  const kind = archiveKind(bytes.subarray(0, Math.min(16, bytes.length)));
   if (kind === 'rar' || kind === '7z') {
     throw new Error(`this is a .${kind}, and nothing in a browser can open one. `
-      + 'Extract it and choose the folder instead.');
+      + 'Extract it and drop the folder instead.');
   }
   if (kind !== 'zip') throw new Error('not a zip archive, and not a folder');
-  const entries = await unzip(buf);
-  return { entries, fallback: f.name.replace(/\.[^.]+$/, '') };
+  const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return { entries: await unzip(buf), fallback: String(name).replace(/\.[^.]+$/, '') };
 }
 
 // ---- the browser: a catalogue on a CDN ---------------------------------------
@@ -489,6 +520,28 @@ export function createModsMenu(opts) {
     busy = false;
   }
 
+  // A folder or an archive dropped on the window, which is the one way in that
+  // takes either -- the two pickers cannot.
+  async function drop(dt) {
+    if (busy) return;
+    busy = true;
+    try {
+      say('reading...');
+      let entries = await entriesFromDrop(dt);
+      if (!entries) { const r = await importFrom(dt.files); entries = r.entries; await install(entries, r.fallback); return; }
+      if (!entries.length) throw new Error('nothing in what was dropped');
+      if (entries.length === 1 && !entries[0].name.includes('/')) {
+        const one = entries[0];
+        const r = await archiveEntries(one.bytes, one.name);
+        await install(r.entries, r.fallback);
+        return;
+      }
+      const top = entries[0].name.split('/')[0];
+      await install(entries, entries.every((e) => e.name.startsWith(`${top}/`)) ? top : null);
+    } catch (e) { say(`import failed: ${e.message}`); }
+    busy = false;
+  }
+
   async function toggle(mod) {
     if (busy) return;
     busy = true;
@@ -562,22 +615,38 @@ export function createModsMenu(opts) {
       rows.push({ label: 'BACK', action: () => { view = 'installed'; search = ''; message = null; paper.redraw(); } });
       return { title: 'MOD BROWSER', rows, search, searchHint: 'TYPE TO SEARCH', message };
     }
-    const rows = mods.map((m) => ({
-      label: m.name,
-      note: m.enabled ? mib(m.bytes) : 'OFF',
-      dim: !m.enabled,
-      action: () => toggle(m),
-      remove: () => remove(m),
-    }));
-    rows.push({ label: 'IMPORT A .ZIP', action: () => fileInput.click() });
-    rows.push({ label: 'IMPORT A FOLDER', action: () => dirInput.click() });
+    // Round 84: what is installed belongs on the game's own mods screen, which
+    // lists it, greys it and toggles it already. This menu is what that screen
+    // cannot do: bring a mod in, and take one out again.
+    if (view === 'remove') {
+      const rows = mods.map((m) => ({
+        label: m.name,
+        note: mib(m.bytes),
+        action: () => remove(m),
+        remove: () => remove(m),
+      }));
+      rows.push({ label: 'BACK', action: () => { view = 'installed'; message = null; paper.redraw(); } });
+      return { title: 'REMOVE MOD', rows, message: message || (mods.length ? null : 'NO MODS') };
+    }
+    const rows = [];
+    rows.push({ label: 'IMPORT MOD', action: () => fileInput.click() });
     if (o.catalogueBase) rows.push({ label: 'MOD BROWSER', action: () => openBrowse() });
+    if (mods.length) rows.push({ label: 'REMOVE MOD', action: () => { view = 'remove'; message = null; paper.redraw(); } });
     rows.push({ label: 'BACK', action: () => paper.close('back') });
-    return { title: 'MODS', rows, message: message || (mods.length ? null : 'NO MODS YET') };
+    return { title: 'MODS', rows, message: message || 'OR DROP A FOLDER OR .ZIP HERE' };
   }
 
   fileInput.addEventListener('change', () => take(fileInput));
   dirInput.addEventListener('change', () => take(dirInput));
+  // the window takes a drop while the menu is up, and only then: the game has the
+  // page to itself otherwise
+  const overDrop = (ev) => { if (paper.isOpen()) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; } };
+  window.addEventListener('dragover', overDrop);
+  window.addEventListener('drop', (ev) => {
+    if (!paper.isOpen()) return;
+    ev.preventDefault();
+    drop(ev.dataTransfer);
+  });
 
   // The engine scans mods/ once, before main. So a mod that arrived during this
   // visit is in the page's store and not in the game's list, and the only way
@@ -598,7 +667,7 @@ export function createModsMenu(opts) {
         }
         // X and not Delete: the page is handed the keys the input shim forwards,
         // and Delete is not one of them, so a row bound to it never went
-        if (code === 'KeyX' && view === 'installed') {
+        if (code === 'KeyX' && view === 'remove') {
           const row = paper.currentRow();
           if (row && row.remove) { row.remove(); return true; }
         }

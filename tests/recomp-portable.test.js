@@ -63,7 +63,11 @@ test('a window is a byte range inside a large chunk, and the payload is a dozen 
   // length, so the probe requires Content-Range's total to match it.
   assert.match(portable, /async function probeRanges\(\) \{/);
   assert.match(portable, /Range: 'bytes=0-63'/);
-  assert.match(portable, /ranges = got === 64 && claimed === want;/);
+  // round 84: one question is a coin toss on a host whose answers vary, so the
+  // probe asks about four chunks and every one has to come back right
+  assert.match(portable, /var n = count\(b\), picks = \[0, Math\.floor\(n \/ 3\), Math\.floor\(\(2 \* n\) \/ 3\), n - 1\]/);
+  assert.match(portable, /if \(got !== 64 \|\| claimed !== want\) \{/);
+  assert.match(portable, /ranges = true;/);
   assert.match(portable, /"bytes": b_len/, 'the page carries the raw stream length so the probe has a number to check');
   assert.match(portable, /--part-mib/, 'a 1 MiB cut exists for a host whose ranges cannot be trusted');
 });
@@ -71,7 +75,8 @@ test('a window is a byte range inside a large chunk, and the payload is a dozen 
 test('the pieces of a read are fetched in parallel', () => {
   // 49 MB of module in 1 MiB pieces, one at a time, was 23.2 s to the first frame
   assert.match(portable, /for \(var w = 0; w < Math\.min\(6, parts\.length\); w\+\+\) crew\.push\(worker\(\)\);/);
-  assert.match(portable, /if \(r\.status === 206 && u\.length === p\.take\) return unscramble/, 'the window, when the answer is the window');
+  assert.match(portable, /if \(r\.status === 206 && u\.length === p\.take && \(mine < 0 \|\| told === mine\)\) \{/,
+    'the window, when the answer is the window and about the right file');
   assert.match(portable, /ranges = false;/, 'and a host that ignores Range is noticed and not asked again');
 });
 
@@ -222,7 +227,11 @@ test('round 77: both sides of the seam agree what the keystream is called', () =
   assert.match(portable, /if \(!xorKey \|\| pos < 0\) return buf;|if \(!KEY\) return bytes;/);
   // the position rides beside the range, because that is what unscrambles it
   assert.match(portable, /\+ '@' \+ \(p\.i \* S\[p\.s\]\.size \+ p\.within\)/);
-  assert.ok(b.includes("const frag = url.slice(h + 3), cut = frag.indexOf('@');"), 'the Worker reads it back');
+  assert.ok(b.includes("let frag = url.slice(h + 3);") && b.includes("const cut = frag.indexOf('@');"), 'the Worker reads it back');
+  // round 84: and the chunk's own length after it, which is the only thing a
+  // Content-Range total can be checked against
+  assert.match(portable, /\+ '!' \+ chunkLen\(p\.s, p\.i\)/);
+  assert.ok(b.includes("const bang = frag.indexOf('!');"));
 });
 
 test('round 77: the loading screen says which chunk it is on', () => {

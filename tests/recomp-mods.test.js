@@ -179,7 +179,9 @@ test('the import row is a mod, and the toggle on it is the button', () => {
   assert.ok(b.includes("if (!modsOn) { log('  mods=0: no mods, and no import row'); return 0; }"), '?mods=0 leaves it all out');
   const p = src('play.mjs');
   assert.ok(p.includes('hooks.onModImport = () => { modsMenu.open(); };'));
-  assert.ok(p.includes("import { createModsMenu } from './mods.mjs';"));
+  // round 84: the page also asks the store whether there is a mod at all, to
+  // decide whether this browser needs EnableMods turned on once
+  assert.ok(p.includes("import { createModsMenu, openModDb, listMods, MODS_DB } from './mods.mjs';"));
 });
 
 test('importing over a mod replaces it rather than merging into it', () => {
@@ -362,4 +364,48 @@ test('round 82: installing a mod turns mods on in the stored options', () => {
   const install = mods.slice(mods.indexOf('async function install('), mods.indexOf('async function install(') + 1400);
   assert.match(install, /if \(o\.onInstalled\) \{ try \{ await o\.onInstalled\(\); \}/);
   assert.equal((mods.match(/o\.onInstalled/g) || []).length, 2, 'only the install path calls it');
+});
+
+test('round 84: the page menu is what the game screen cannot do', () => {
+  // The game's own mods screen lists what is installed, greys it and toggles it.
+  // This menu duplicated all of that; it keeps only bringing a mod in and taking
+  // one out, and the list of installed mods lives behind REMOVE A MOD.
+  const mods = readFileSync(join(root, 'scripts', 'recomp', 'web', 'mods.mjs'), 'utf8');
+  assert.match(mods, /if \(view === 'remove'\) \{/);
+  assert.match(mods, /return \{ title: 'REMOVE MOD', rows,/);
+  assert.match(mods, /if \(mods\.length\) rows\.push\(\{ label: 'REMOVE MOD'/);
+  // the actions view builds its rows from nothing, not from the installed mods
+  assert.match(mods, /const rows = \[\];\s*\n\s*rows\.push\(\{ label: 'IMPORT MOD'/);
+  assert.match(mods, /if \(code === 'KeyX' && view === 'remove'\)/, 'X removes where the mods are listed');
+  // one row, and it takes either: a file chooser cannot pick a folder and a
+  // folder chooser cannot pick a file, so a drop is the way in that takes both
+  assert.match(mods, /export async function entriesFromDrop\(dt\)/);
+  assert.match(mods, /window\.addEventListener\('drop', \(ev\) => \{/);
+  assert.match(mods, /if \(!paper\.isOpen\(\)\) return;/, 'and only while the menu is up');
+  assert.match(mods, /message: message \|\| 'OR DROP A FOLDER OR \.ZIP HERE'/);
+  assert.doesNotMatch(mods, /label: 'IMPORT A FOLDER'/);
+});
+
+test('round 84: the right margin is the torn one', () => {
+  // The sheet's right corner is torn further in than its left, so a note or a
+  // counter right-aligned to SIDE sat on the tear -- the browser's "3/33" was
+  // drawn outside the paper altogether.
+  const ov = readFileSync(join(root, 'scripts', 'recomp', 'web', 'menu_overlay.mjs'), 'utf8');
+  assert.match(ov, /const PANEL_W = 392, PAD = 16, SIDE = 26, RIGHT = 46, TAIL = 30, MAX_ROWS = 7;/);
+  assert.match(ov, /if \(row\.note\) drawText\(g, row\.note, px \+ PANEL_W - RIGHT - noteW, y, A\.atlasLight\);/);
+  assert.doesNotMatch(ov, /\$\{st\.cursor \+ 1\}\/\$\{n\}/, 'and the counter is gone with it');
+});
+
+test('round 84: a browser that already had a mod gets mods turned on too', () => {
+  // Round 82 only turned EnableMods on when a mod was installed, so a browser
+  // that had one BEFORE that shipped kept round 76's EnableMods=0: the mod was
+  // seeded, listed by the engine, and never run.
+  const play = readFileSync(join(root, 'scripts', 'recomp', 'web', 'play.mjs'), 'utf8');
+  assert.match(play, /async function anyModInstalled\(\)/);
+  assert.match(play, /async function enableModsOnce\(\)/);
+  assert.match(play, /if \(await anyModInstalled\(\)\) \{/);
+  // once per browser, so turning them off in the game afterwards sticks
+  assert.match(play, /localStorage\.getItem\('isaac-mods-enabled-once'\) === '1'/);
+  assert.match(play, /localStorage\.setItem\('isaac-mods-enabled-once', '1'\)/);
+  assert.match(play, /import \{ createModsMenu, openModDb, listMods, MODS_DB \} from '\.\/mods\.mjs';/);
 });
