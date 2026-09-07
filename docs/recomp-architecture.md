@@ -7426,3 +7426,72 @@ installed through the page's own import): `Running Lua Script:
 //mods/specialistforgooditems/main.lua`, then the intro cutscene, then
 `Menu Bestiary Init` -- the title menu, where before it exited at the Lua line.
 Family 4105 pass / 0 fail, mods 37/37, saves 15/15, EDIT FILE 11/11.
+
+### 21.102 Round 86c: all thirty-two of them, and the store that could not be rebuilt
+
+Rounds 85 and 86b each found a reason mods did not work, and each was signed
+off on a single mod. A sample of one is what let 86b ship after 85: no mod path
+had ever resolved, and then one mod reached a function nothing had ever lifted
+-- neither bug would have been caught by the other's mod. So the question stops
+being "does this mod work" and becomes "do they all".
+
+`scripts/recomp/web/drive_modpack.mjs` walks the whole catalogue. Each mod gets
+its own browser context, is installed through the page's own file input, and
+then: reload, boot, Enter until the engine's own log says a run started, walk
+and fire, sampling the host's frame counter. What counts as working is what the
+ENGINE says, never the page:
+
+  * its directory in the engine's own `LOADED MOD //mods/<dir>/` line,
+  * its `main.lua` in the engine's own `Running Lua Script` line, when it ships
+    one -- the zip's central directory says whether it does,
+  * at least one of the mod's OWN files opened, under `ISAAC_FS_TRACE=1`,
+  * no `[odsa] [ERROR]` naming it, no trap, no page error, and a run started,
+  * a frame rate that does not fall away from a no-mod baseline.
+
+Some mods only redraw one thing, and that thing's art is only read when it is on
+the screen, so a starting room proves nothing about them. The driver puts the
+thing there through the game's own debug console. Two details were load-bearing
+and both cost a run to find. The console is off unless `options.ini` says
+`EnableDebugConsole=1`, and that file has to be seeded on a page that is NOT the
+game -- on the game page an engine is already booting and persists its own
+options over the seeded one. And a key pressed for less than a frame is a key
+the engine never sees: it samples input once a tick, so down-and-up inside one
+tick is nothing at all. `hold()` and a 60 ms-per-character typist, as
+drive_floors.mjs already had.
+
+The entity numbers have to be right for the same reason. `spawn 5.60` for a
+haunted chest spawns something else and the mod's file is never asked for --
+which reads exactly like a mod that does not work. They come out of the mod's
+own file names: `slot_004_beggar.png` is SLOT variant 4, the haunted chest is
+pickup 58, the hell game is slot 15.
+
+The result, over the 32 mods in the catalogue:
+
+    engine loaded    32 / 32
+    main.lua ran     17 / 17 that ship one
+    own file read    28 / 28 that ship a resource   (the other four are Lua only)
+    traps, errors     0,  0
+    fps              baseline 60.0, mods 59.7 - 60.3
+
+60 fps is the cap, so equal-at-the-cap proves nothing about cost. Under a 4x CPU
+throttle, where the cap is gone: baseline **52.9**, the seven heaviest mods
+**51.2 - 53.9** (median 52.5). Nothing measurable.
+
+**The store that could not be rebuilt.** The first version of this driver polled
+IndexedDB to see whether a mod had landed, with `indexedDB.open('isaac-mods')`
+-- no version. That CREATES the database, empty, at version 1. The page's own
+`open(name, 1)` then sees a current version, never fires `onupgradeneeded`,
+never makes its stores, and every import from then on fails with
+
+    [mods] import failed: Failed to execute 'transaction' on 'IDBDatabase':
+           One of the specified object stores was not found.
+
+for the life of the origin, with nothing to do about it but clear site data. An
+interrupted upgrade leaves the same wreckage, and the save database has the same
+shape -- there the symptom is worse, because saves simply stop persisting and
+nothing says so. All three openers now check what they actually got and reopen
+one version up to build what is missing. The first open names no version on
+purpose: asking for 1 fails outright on a database that has already been
+repaired to 2. `drive_modpack.mjs --breakdb=1` poisons the origin exactly the
+way the driver did, before any page script runs; the import has to succeed
+anyway, and it does.

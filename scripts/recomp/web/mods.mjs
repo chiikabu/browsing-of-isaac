@@ -89,18 +89,37 @@ export const IMPORT_METADATA = `<?xml version="1.0" encoding="UTF-8"?>
 
 // ---- the store ---------------------------------------------------------------
 
+// Round 86c: a database can exist at this version WITHOUT the stores in it.
+// `indexedDB.open(name)` with no version creates an empty database at version
+// 1, and an upgrade that is interrupted can leave one behind too; after that
+// `open(name, 1)` sees a current version and never fires onupgradeneeded, so
+// the stores are never made and every import fails for the life of the origin
+// with "One of the specified object stores was not found" -- with no way out
+// but clearing site data. So the stores are checked after opening, and a
+// database missing any of them is reopened one version up to create them.
+const STORES = [F_STORE, M_STORE, S_STORE];
+const makeStores = (db) => {
+  for (const s of STORES) if (!db.objectStoreNames.contains(s)) db.createObjectStore(s);
+};
 export function openModDb() {
-  return new Promise((resolve, reject) => {
-    if (typeof indexedDB === 'undefined') { resolve(null); return; }
-    const req = indexedDB.open(MODS_DB, 1);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(F_STORE)) db.createObjectStore(F_STORE);   // '<id>/<rel>' -> {bytes}
-      if (!db.objectStoreNames.contains(M_STORE)) db.createObjectStore(M_STORE);   // '<id>'       -> {id,name,files,bytes,added,enabled}
-      if (!db.objectStoreNames.contains(S_STORE)) db.createObjectStore(S_STORE);   // fs key       -> {bytes}
-    };
+  // The first open names no version on purpose: it opens whatever is there at
+  // whatever version it is at (asking for 1 fails outright on a database that
+  // has been repaired to 2), and creates it at version 1 if it is absent. The
+  // store check below is what makes that safe.
+  const open = (version) => new Promise((resolve, reject) => {
+    const req = version ? indexedDB.open(MODS_DB, version) : indexedDB.open(MODS_DB);
+    req.onupgradeneeded = () => makeStores(req.result);   // '<id>/<rel>' -> {bytes}, '<id>' -> {...}, fs key -> {bytes}
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
+  });
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') { resolve(null); return; }
+    open(0).then((db) => {
+      if (STORES.every((s) => db.objectStoreNames.contains(s))) { resolve(db); return; }
+      const next = db.version + 1;
+      db.close();
+      open(next).then(resolve, reject);
+    }, reject);
   });
 }
 

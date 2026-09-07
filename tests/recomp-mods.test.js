@@ -474,3 +474,50 @@ test('round 86b: the sound-manager block patch does not anchor on a line that ca
   assert.match(firstLine, /u3400_4 = \(uint32_t\)\(EBX \+ \(\(uint32_t\)0xc985104du\)\);/,
     'it starts at the sbb sequence instead');
 });
+
+test('round 86c: a database without its stores is repaired, not surrendered to', () => {
+  // Found by breaking it. `indexedDB.open(name)` with NO version creates an
+  // empty database at version 1; after that `open(name, 1)` sees a current
+  // version, never fires onupgradeneeded, and the stores are never made -- so
+  // every import fails for the life of the origin with "One of the specified
+  // object stores was not found", and every save quietly goes nowhere. An
+  // interrupted upgrade leaves the same wreckage. Both openers check what they
+  // actually got and reopen one version up to build what is missing.
+  const mods = readFileSync(join(root, 'scripts', 'recomp', 'web', 'mods.mjs'), 'utf8');
+  assert.match(mods, /STORES\.every\(\(s\) => db\.objectStoreNames\.contains\(s\)\)/,
+    'the mods store checks all three stores are really there');
+  assert.match(mods, /const next = db\.version \+ 1;/, 'and reopens one version up when they are not');
+
+  for (const f of ['boot_web.mjs', 'play.mjs']) {
+    const src = readFileSync(join(root, 'scripts', 'recomp', 'web', f), 'utf8');
+    assert.match(src, /db\.objectStoreNames\.contains\(SAVE_STORE\)/, `${f} checks the save store exists`);
+    assert.match(src, /const next = db\.version \+ 1;/, `${f} reopens one version up to make it`);
+    // an unconditional createObjectStore throws on a database that has it
+    assert.ok(!/onupgradeneeded = \(\) => \{ req\.result\.createObjectStore\(SAVE_STORE\); \}/.test(src),
+      `${f} does not create the store unconditionally`);
+  }
+
+  // A versionless open is only safe when whoever does it then builds what is
+  // missing. drive_mods.mjs only reads, so it must name a version; the pack
+  // driver seeds options.ini, so it opens versionless and repairs like the page.
+  const readOnly = readFileSync(join(root, 'scripts', 'recomp', 'web', 'drive_mods.mjs'), 'utf8')
+    .split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.equal(readOnly.match(/indexedDB\.open\(\s*(?:name|'isaac-[a-z]+')\s*\)/g), null,
+    'drive_mods.mjs, which only reads, names a version');
+  const pack = readFileSync(join(root, 'scripts', 'recomp', 'web', 'drive_modpack.mjs'), 'utf8');
+  assert.match(pack, /objectStoreNames\.contains\('files'\)/, 'the pack driver checks before it writes');
+  assert.match(pack, /db\.version \+ 1/, 'and repairs the same way the page does');
+});
+
+test('round 86c: every mod in the catalogue is driven, not one of them', () => {
+  // Rounds 85 and 86b each found a different reason mods did not work, and each
+  // was signed off on a single mod. Neither bug would have been caught by the
+  // other's mod: 85 was every path, 86b was one unlifted function only some
+  // mods reach. The driver walks the whole catalogue and asks the ENGINE.
+  const d = readFileSync(join(root, 'scripts', 'recomp', 'web', 'drive_modpack.mjs'), 'utf8');
+  assert.match(d, /LOADED MOD \\\/\*mods\\\//, 'the engine naming the directory it loaded is the witness');
+  assert.match(d, /Running Lua Script: /, 'and the engine running its main.lua');
+  assert.match(d, /unresolved indirect call\|TRAP in main/, 'a trap fails the mod');
+  assert.match(d, /baseline/, 'and there is a no-mod baseline to compare the frame rate against');
+  assert.match(d, /medianFps < floorFps/, 'a mod that loads and costs the frame rate has not worked');
+});

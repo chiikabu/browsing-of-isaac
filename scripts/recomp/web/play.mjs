@@ -606,13 +606,27 @@ async function enableModsInOptions() {
 }
 
 // ---- the saves menu ------------------------------------------------------------------
+// Round 86c: same self-heal as boot_web's openSaveDb -- a database that exists
+// at this version without its store never gets one from `open(name, 1)`.
 function openStore() {
-  return new Promise((resolve, reject) => {
-    if (typeof indexedDB === 'undefined') { resolve(null); return; }
-    const req = indexedDB.open(SAVE_DB, 1);
-    req.onupgradeneeded = () => { req.result.createObjectStore(SAVE_STORE); };
+  // versionless first: whatever is there, at whatever version it is at
+  const open = (version) => new Promise((resolve, reject) => {
+    const req = version ? indexedDB.open(SAVE_DB, version) : indexedDB.open(SAVE_DB);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(SAVE_STORE)) db.createObjectStore(SAVE_STORE);
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
+  });
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') { resolve(null); return; }
+    open(0).then((db) => {
+      if (db.objectStoreNames.contains(SAVE_STORE)) { resolve(db); return; }
+      const next = db.version + 1;
+      db.close();
+      open(next).then(resolve, reject);
+    }, reject);
   });
 }
 function readAllSaves(db) {

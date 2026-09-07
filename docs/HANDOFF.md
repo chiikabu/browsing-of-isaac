@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-06, recomp rounds 26-86b: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-86c: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -181,6 +181,24 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 86c: all thirty-two of them** (§21.102).
+  85 and 86b were each signed off on ONE mod, and neither bug would have been
+  caught by the other's. `drive_modpack.mjs` walks the whole catalogue: each mod
+  in its own context, installed through the page's own file input, reload, boot,
+  Enter until the engine says a run started, then played. The witness is the
+  engine -- its `LOADED MOD` line, its `Running Lua Script` line, and its own
+  files opened under `ISAAC_FS_TRACE=1`. Mods that only redraw one thing get
+  that thing spawned through the game's debug console (which needs
+  `EnableDebugConsole=1` seeded on a page that is **not** the game, and keys
+  held longer than a frame, or the engine never sees them).
+  **32/32 loaded, 17/17 ran their Lua, 28/28 with resources had their own files
+  read, 0 traps, 0 errors**; fps 59.7-60.3 against a 60.0 baseline, and under a
+  4x CPU throttle 51.2-53.9 against 52.9.
+  Found on the way: `indexedDB.open(name)` with **no version** creates the
+  database empty, after which the page's `open(name, 1)` never upgrades it, its
+  stores are never made, and **every import fails for the life of the origin**
+  (saves silently stop persisting on the same fault). All three openers probe
+  and repair now; `--breakdb=1` reproduces the poisoning.
 - **Round 86b: the functions only a mod ever calls** (§21.101).
   A mod's `main.lua` ran and the module stopped: `indirect call to 0x0086fc60
   ... was not lifted`. That address is `mov eax,[0xc71678]; ret`, an inline

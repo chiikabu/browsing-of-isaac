@@ -168,7 +168,10 @@ await page.addInitScript((base) => { window.isaacModCatalogue = base; }, CAT_BAS
 const SAVE_KEY = 'c:/isaac/documents/my games/binding of isaac repentance+/drive-mods-witness.dat';
 const SAVE_TEXT = 'a save written before any mod existed';
 const readStores = () => page.evaluate(async ([saveKey]) => {
-  const open = (name) => new Promise((res, rej) => { const r = indexedDB.open(name); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  // the version is not optional: a versionless open CREATES the database empty
+  // if it is not there yet, and the page's own open then never upgrades it, so
+  // its stores are never made and every import fails from then on (round 86c)
+  const open = (name) => new Promise((res, rej) => { const r = indexedDB.open(name, 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
   const all = (db, store) => new Promise((res) => {
     if (!db.objectStoreNames.contains(store)) { res([]); return; }
     const out = []; const r = db.transaction(store, 'readonly').objectStore(store).openCursor();
