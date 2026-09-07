@@ -181,6 +181,14 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **A push is not a deploy.** After every push:
+  ode scripts/recomp/assets/check_deployed.mjs\ -- it hashes what the CDN and
+  Pages actually serve against what was built here. The module lives in the
+  part-A chunks (\c/a*.bin\), so a stale one of those is a stale ENGINE however
+  current the page is: round 86b was reported as shipped while jsDelivr served
+  the round-85 module for nine hours, and the trap that came back was identical
+  to the original down to the last dispatch count, because it was the same
+  build. Purge what it calls STALE, then run it again.
 - **Round 86c: all thirty-two of them** (§21.102).
   85 and 86b were each signed off on ONE mod, and neither bug would have been
   caught by the other's. `drive_modpack.mjs` walks the whole catalogue: each mod
