@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Script } from 'node:vm';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const hostSrc = join(root, 'scripts', 'recomp', 'host', 'src');
@@ -377,4 +378,37 @@ test('round 60: a large texture upload goes in bands, so the GL transfer chunk n
   assert.ok(b.includes("dropBody(blob);                                           // round 60: this frame lives as long as main() does"), 'the placed image\'s bytes are dropped');
   const d = readFileSync(join(root, 'scripts', 'recomp', 'web', 'drive_memory.mjs'), 'utf8');
   assert.ok(d.includes("await cdp.send('HeapProfiler.collectGarbage')") && d.includes('window.__texUploads = T;'), 'the memory driver collects garbage before its reading and counts the uploads');
+});
+
+test('round 86: the reader Worker parses as the script it becomes', () => {
+  // This is the test that was missing. READER_WORKER is a template literal, so
+  // what the Worker receives is the COOKED value: a backslash in the source is
+  // eaten as an escape and never reaches it. Round 84 wrote a Content-Range
+  // check as /\/(\d+)\s*$/, which cooked into //(d+)s*$/ -- a line comment that
+  // swallowed the assignment before it. Every build from that round on threw
+  // `Uncaught SyntaxError: Unexpected token 'if'` the moment the Worker started,
+  // so no read was ever prefetched and round 83's retries never ran either.
+  // Reading the source text is not enough to catch that; it has to be cooked.
+  const b = readFileSync(join(root, 'scripts', 'recomp', 'web', 'boot_web.mjs'), 'utf8');
+  const open = b.indexOf('`', b.indexOf('const READER_WORKER'));
+  let end = -1, depth = 0;
+  for (let i = open + 1; i < b.length; i++) {
+    const c = b[i];
+    if (c === '\\') { i++; continue; }
+    if (depth === 0 && c === '`') { end = i; break; }
+    if (c === '$' && b[i + 1] === '{') { depth++; i++; continue; }
+    if (depth > 0 && c === '}') depth--;
+  }
+  assert.ok(end > open, 'the template closes');
+  const raw = b.slice(open + 1, end);
+
+  // no backslash: the cooked source is then the source, and this whole class of
+  // bug is gone rather than caught one instance at a time
+  assert.ok(!raw.includes('\\'), 'no backslash inside the Worker template');
+  assert.equal(raw.indexOf('${'), -1, 'and no substitution: the Worker source is a constant');
+
+  // and it parses as a classic script, which is what a Worker is handed
+  const cooked = new Function('return `' + raw + '`')();
+  assert.equal(cooked.length, raw.length, 'nothing was eaten on the way to the Worker');
+  assert.doesNotThrow(() => new Script(cooked), 'the Worker source parses');
 });

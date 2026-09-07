@@ -224,14 +224,28 @@ let trailShipped = false;                                 // the trail came with
 // because a delivery needs this thread to yield; a suspended read is one.
 // ?reader=0 keeps the synchronous reads (the A/B, and the fallback where
 // there is no Worker).
+// The reader Worker's whole source is the template literal below, so two
+// characters are forbidden inside it and neither one is a build error:
+//
+//   a backtick ends the template, and
+//   a backslash is eaten as an escape -- the source the Worker receives is the
+//   *cooked* value, three characters shorter than what is written here.
+//
+// Round 84 wrote a Content-Range check here as /\/(\d+)\s*$/. Cooked, that is
+// //(d+)s*$/ -- a line comment. The `const m =` before it dangled, the parser
+// reached the next line and said `Unexpected token 'if'`, and from that round on
+// the Worker never started for anyone: every read went the synchronous way and
+// round 83's retries went with it. Write no backslash in here. If a regex is
+// wanted, do it by hand with indexOf/slice, as that check now does.
 const READER_WORKER = `
 const cache = new Map(), inflight = new Map(), done = new Set();
 let jobs = [], ji = 0, budget = 0, held = 0, inflightBytes = 0, parallel = 4, prefetched = 0, ahead = 0;
 // Round 77: the chunked build's keystream. Named xorKey rather than key, because
 // a job message already carries a field of that name -- the cache key of the
 // window it wants -- and a handler that greeted every one of those as a new
-// keystream answered no reads at all. No backticks in here: this whole worker is
-// a template literal, and one would end it.
+// keystream answered no reads at all. Nothing in here may contain a backtick or
+// a backslash -- see the note above the template, which is where the reason can
+// be written down with the characters it is about.
 let xorKey = null;
 function unscramble(buf, pos) {
   if (!xorKey || pos < 0) return buf;
@@ -272,10 +286,12 @@ function start(key, url, len, why, want) {
       try {
         const r = await fetch(url, init);
         if (r.ok) {
-          // the host's own answer says which file it thinks it is serving
+          // the host's own answer says which file it thinks it is serving. The
+          // total is read by hand: a regex would need backslashes, and see above.
           if (r.status === 206 && chunkBytes > 0) {
-            const m = /\/(\d+)\s*$/.exec(r.headers.get('content-range') || '');
-            if (m && Number(m[1]) !== chunkBytes) { last = 'the host calls that chunk ' + m[1] + ' bytes, not ' + chunkBytes; break; }
+            const cr = r.headers.get('content-range') || '', sl = cr.lastIndexOf('/');
+            const total = sl < 0 ? NaN : Number(cr.slice(sl + 1).trim());
+            if (Number.isFinite(total) && total !== chunkBytes) { last = 'the host calls that chunk ' + total + ' bytes, not ' + chunkBytes; break; }
           }
           return await r.arrayBuffer();
         }

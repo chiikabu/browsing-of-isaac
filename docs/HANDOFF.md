@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-06, recomp rounds 26-85: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-86: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -181,6 +181,16 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 86: the two characters the template ate** (§21.100).
+  `Uncaught SyntaxError: Unexpected token 'if'` -- reported twice, checked twice,
+  found nothing, because both checks read the template's **source text**. The
+  reader Worker's source is a template literal, so the Worker gets the *cooked*
+  value and cooking eats backslashes: round 84's `/\/(\d+)\s*$/` arrives as
+  `//(d+)s*$/`, a line comment that swallows the `const m =` before it. **The
+  reader Worker had not started for anyone since round 84** -- every read
+  synchronous, and round 83's retries never ran. The total is read with
+  `lastIndexOf`/`slice` now, and a test cooks the template and parses it as the
+  classic script a Worker is handed. Family **4105 pass / 0 fail**.
 - **Round 85: two characters, and no mod had ever run** (§21.99).
   Every mod in this port was inert since round 74 -- no sprite, no sound, no
   Lua. `sub_00a17180` resolves every mod file from an index of **strings** and

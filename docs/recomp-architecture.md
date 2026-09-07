@@ -7326,3 +7326,40 @@ archive index is consulted first, so it never won, and it would leave a removed
 mod's art behind); and mounting each mod directory into KAGE (`0x00a179c0` is a
 plain cdecl `mount(path, 0, 0)`, so it is callable -- and unnecessary, because
 the paths resolve once they are spelled the way the index holds them).
+
+### 21.100 Round 86: the two characters the template ate
+
+Two people reported the same line and I checked it twice and found nothing:
+
+    Uncaught SyntaxError: Unexpected token 'if'
+    reader Worker failed (...); synchronous reads from here
+
+The reader Worker's whole source is a template literal in `boot_web.mjs`, so
+what the Worker receives is the **cooked** value, and cooking eats backslashes:
+`\/` becomes `/`, `\d` becomes `d`, `\s` becomes `s`. Round 84's Content-Range
+check was written `/\/(\d+)\s*$/` and arrives at the Worker as
+
+    const m = //(d+)s*$/.exec(r.headers.get('content-range') || '');
+    if (m && Number(m[1]) !== chunkBytes) { ... }
+
+-- a line comment that swallows its own assignment. The parser reaches the next
+line, finds `if` where the initialiser should be, and the Worker never starts.
+
+Both times I checked it I read the template's **source text**, where the
+backslashes are still there, and it parsed, so I concluded the report could not
+be reproduced. It reproduces the moment the template is cooked first:
+
+    raw 5222 -> cooked 5219
+    COOKED FAILS: Unexpected token 'if'
+
+The cost was two rounds of every read going the synchronous way -- and round
+83's retries live inside that Worker, so the fix for the `lazy pread FAILED`
+traps had never run either. The check now reads the total by hand
+(`lastIndexOf('/')`, `slice`), because a regex here needs backslashes.
+
+The template already carried a comment saying no backticks may appear inside it.
+A backtick at least fails the build. A backslash fails nothing: it is a Worker
+that does not parse, on a path that degrades quietly to a slower one. The
+invariant is now a test that cooks the template and parses the result as the
+classic script a Worker is handed, and asserts the template holds no backslash
+at all -- the class, not the instance.
