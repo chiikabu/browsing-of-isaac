@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import base64
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -330,7 +331,13 @@ PROVIDER_JS = r"""
     }
     return parts;
   }
-  function name(s, i) { return P.base + '/' + S[s].tag + i + '.bin'; }
+  // the token comes from the chunk's own bytes, so a chunk that changed has a
+  // URL that changed and a browser holding the old one under a week-long
+  // max-age cannot splice it into this build (round 86d)
+  function name(s, i) {
+    var v = S[s].v && S[s].v[i];
+    return P.base + '/' + S[s].tag + i + '.bin' + (v ? '?v=' + v : '');
+  }
   async function piece(s, i) {
     var key = s + ':' + i, hit = cache.get(key);
     if (hit) return hit;
@@ -618,8 +625,30 @@ def cmd_chunks(args) -> int:
     else:
         n_a = cut(whole, a_size, emit_for("a", True, a_size))
         n_b = cut(windowed, b_size, emit_for("b", False, b_size))
-    streams = [{"tag": "a", "size": a_size, "gz": True, "n": n_a, "bytes": a_len},
-               {"tag": "b", "size": b_size, "gz": False, "n": n_b, "bytes": b_len}]
+    # Round 86d: a token per chunk, from that chunk's own bytes, which rides in
+    # its URL. jsDelivr answers these with `max-age=604800`, so a returning
+    # visitor keeps chunks for a week -- and a rebuild that changes only part A
+    # leaves that visitor splicing new chunks onto cached old ones. The module
+    # spans four of them, and a spliced module is not a module:
+    #   WebAssembly.instantiate(): size 8760567 > maximum function size 7654321
+    # A per-chunk token (not one per build) is what makes this cheap: a chunk
+    # whose bytes did not change keeps its URL and stays cached, so a module-only
+    # rebuild re-fetches the four part-A chunks and none of the other 29.
+    def chunk_tokens(tag, count):
+        out = []
+        for i in range(count):
+            p = os.path.join(data_dir, "%s%d.bin" % (tag, i))
+            h = hashlib.sha256()
+            with open(p, "rb") as f:
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    h.update(block)
+            out.append(h.hexdigest()[:8])
+        return out
+
+    streams = [{"tag": "a", "size": a_size, "gz": True, "n": n_a, "bytes": a_len,
+                "v": chunk_tokens("a", n_a)},
+               {"tag": "b", "size": b_size, "gz": False, "n": n_b, "bytes": b_len,
+                "v": chunk_tokens("b", n_b)}]
     data = {"streams": streams, "files": table, "base": args.base or "./c",
             "index": index_for(args.dist, files), "manifest": manifest_for(args.dist, files),
             "chunks": n_a + n_b, "status": "loading"}

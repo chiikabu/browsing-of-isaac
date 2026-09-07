@@ -320,3 +320,23 @@ test('round 84: the single-file build fetches nothing, because it has everything
     'and it returns before either of the things that fetch');
   assert.ok(ready.indexOf('if (!P.base) return ranges;') < ready.indexOf('await prefetchAll();'));
 });
+
+test('round 86d: a chunk carries a token from its own bytes into its URL', () => {
+  // jsDelivr answers chunks with max-age=604800, so a returning visitor holds
+  // them for a week. With one stable URL per chunk, a rebuild that changes only
+  // part A leaves that visitor free to mix new chunks with cached old ones --
+  // by cache, by a revalidated Range, or by a fetch that straddled a purge --
+  // and a mixed module is not a module:
+  //   WebAssembly.instantiate(): size 8760567 > maximum function size 7654321
+  // The token is per CHUNK rather than per build on purpose: a chunk whose
+  // bytes did not change keeps its URL and stays cached, so a module-only
+  // rebuild re-fetches four chunks instead of all thirty-three.
+  const p = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'portable.py'), 'utf8');
+  assert.match(p, /def chunk_tokens\(tag, count\)/, 'the tokens are computed per chunk');
+  assert.match(p, /h\.hexdigest\(\)\[:8\]/, 'and they come from that chunk\'s own bytes');
+  assert.match(p, /"v": chunk_tokens\("a", n_a\)/, 'part A carries them');
+  assert.match(p, /"v": chunk_tokens\("b", n_b\)/, 'and so does part B');
+  // the query has to sit before the #r= fragment the reader Worker strips off
+  assert.match(p, /\.bin' \+ \(v \? '\?v=' \+ v : ''\)/, 'the URL carries the token');
+  assert.match(p, /var v = S\[s\]\.v && S\[s\]\.v\[i\];/, 'read out of the stream the chunk belongs to');
+});
