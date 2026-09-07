@@ -7282,3 +7282,47 @@ And the sheet's right corner is torn further in than its left, so a note or a
 counter right-aligned to `SIDE` sat on the tear -- the browser's `3/33` was drawn
 outside the paper altogether. `RIGHT` is the margin that side keeps; the counter
 is gone, because the line at the bottom already says how long the list is.
+
+### 21.99 Round 85: two characters, and no mod had ever run
+
+Every mod in this port was inert. Not a sprite, not a sound, not a line of Lua --
+and it had been that way since mods were added in round 74. Rounds 82 and 84
+each found something real on the way to it (the import row was itself a mod;
+EnableMods was off) and neither was the reason.
+
+The engine's own words, once it was asked to speak:
+
+    [isaac][mods] enabled=1  EnableMods(Game+0x2a38d)=1
+    [isaac][kage] asked for '//mods/cat-coin/main.lua'
+    [isaac][kage] main.lua exists? 0
+
+`sub_00a17180` is the resolver every mod file goes through -- metadata, main.lua,
+every sprite and sound. It answers from an in-memory index of strings and touches
+no filesystem at all, which is why the FS trace showed the mod's whole tree being
+scanned and not one of its files ever opened. And this port builds a mod's path
+off an empty base, so it asked for `//mods/<id>/...` while the index holds
+`mods/<id>/...`. Two characters. The loader asked whether there was a main.lua,
+was told no, and skipped every mod whole:
+
+    while (ESI && MEMR8(ESI) == (uint8_t)0x2fu) ESI = (uint32_t)(ESI + 1u);
+
+Past that, one thing remained. The engine ran the mod and Lua answered `cannot
+open //mods/cat-coin/main.lua: No such file or directory`: Lua opens through its
+own libc, which reads MEMFS, and only the game's own `resources/scripts/*` were
+ever copied there. Every `.lua` a mod carries goes to MEMFS now, beside them.
+
+Measured on a real run, cat coin installed through the menu:
+
+    Running Lua Script: //mods/cat-coin/main.lua
+    fopen('mods/cat-coin/resources/gfx/items/pick ups/pickup_002_coin.png') -> hit
+    fopen('mods/cat-coin/resources/sfx/feedback/penny drop 1.wav')          -> hit
+    19 files read out of the mod, against 0 before
+
+Three things were tried and thrown away on the way, and are worth naming so they
+are not tried again: a fallback that asked the FS layer whenever KAGE missed (it
+worked, and is a host call on a hot path for a problem that was two characters
+wide); seeding a mod's `resources/` over the instance's own namespace (the
+archive index is consulted first, so it never won, and it would leave a removed
+mod's art behind); and mounting each mod directory into KAGE (`0x00a179c0` is a
+plain cdecl `mount(path, 0, 0)`, so it is callable -- and unnecessary, because
+the paths resolve once they are spelled the way the index holds them).

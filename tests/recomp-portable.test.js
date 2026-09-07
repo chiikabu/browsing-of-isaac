@@ -307,3 +307,16 @@ test('round 80: a rebuild can keep the key the uploaded chunks were scrambled wi
   ].join('\n'));
   assert.deepEqual(out.split(/\r?\n/), ['True', 'True', 'True']);
 });
+
+test('round 84: the single-file build fetches nothing, because it has everything', () => {
+  // Round 78 made `ready` prefetch every chunk, for a host whose ranges lie. It
+  // was not gated on there being a host: the single-file build has its payload
+  // inline and no base, so it asked the page for `null/a0.bin` -- eight of those,
+  // no frames, a build that did not run. Every offline build from 820f7d2 to
+  // round 84 was broken this way, and nothing was driving it to notice.
+  assert.match(portable, /if \(!P\.base\) return ranges;/);
+  const ready = portable.slice(portable.indexOf('ready: (async function'), portable.indexOf('ranges: function'));
+  assert.ok(ready.indexOf('if (!P.base) return ranges;') < ready.indexOf('await probeRanges();'),
+    'and it returns before either of the things that fetch');
+  assert.ok(ready.indexOf('if (!P.base) return ranges;') < ready.indexOf('await prefetchAll();'));
+});

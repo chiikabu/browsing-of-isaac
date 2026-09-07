@@ -98,6 +98,10 @@ PATCHES: dict[int, tuple[str, str]] = {
 # function, its first block is re-decoded from 0xa2b5c8, and both targets
 # get a case in its re-entry switch.
 BLOCK_PATCHES: list[tuple[str, str, str]] = [
+    # Round 85: mods. The leading slashes on every mod path (see the marker).
+    ("0x00a171a5",
+     '  RECOMP_VA(0xa171a5u);\n  u3300_4 = (uint32_t)(EBP + ((uint32_t)0x8u));\n  uba00_4 = MEMR32(u3300_4);\n  ESI = uba00_4;\n',
+     "  RECOMP_VA(0xa171a5u);\n  u3300_4 = (uint32_t)(EBP + ((uint32_t)0x8u));\n  uba00_4 = MEMR32(u3300_4);\n  ESI = uba00_4;\n  /* LIFT-PATCH 0x00a171a5 (round 85): mods, all of them.\n     This is the resolver every mod file goes through -- metadata, main.lua,\n     every sprite and sound -- and it answers from an index of strings, never\n     from a filesystem. This port builds a mod's path off an empty base, so it\n     asks for //mods/<id>/... while the index holds mods/<id>/... . Two\n     characters, and nothing of any mod was ever found: the loader saw no\n     main.lua and skipped every mod whole. Step over the leading slashes. */\n  while (ESI && MEMR8(ESI) == (uint8_t)0x2fu) ESI = (uint32_t)(ESI + 1u);\n"),
     # Round 81: achievements keep unlocking with mods on (see the marker text).
     ("0x009299e4",
      '  RECOMP_VA(0x9299e4u);\n  u3300_4 = (uint32_t)(EBP + ((uint32_t)0x8u));\n  ub900_1 = MEMR8(u3300_4);\n',

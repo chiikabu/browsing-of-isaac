@@ -409,3 +409,32 @@ test('round 84: a browser that already had a mod gets mods turned on too', () =>
   assert.match(play, /localStorage\.setItem\('isaac-mods-enabled-once', '1'\)/);
   assert.match(play, /import \{ createModsMenu, openModDb, listMods, MODS_DB \} from '\.\/mods\.mjs';/);
 });
+
+test('round 85: a mod path reaches KAGE without its leading slashes', () => {
+  // This is what made mods work. Every mod file the engine wants -- metadata,
+  // main.lua, every sprite and sound -- goes through sub_00a17180, which answers
+  // from an index of strings and never touches a filesystem. This port builds a
+  // mod's path off an empty base, so it asked for `//mods/<id>/...` while the
+  // index holds `mods/<id>/...`: two characters, and nothing of any mod was ever
+  // found. The loader saw no main.lua and skipped every mod whole, which is why
+  // no mod had ever run in this port.
+  const patches = readFileSync(join(root, 'scripts', 'recomp', 'lift', 'lift_patches.py'), 'utf8');
+  assert.match(patches, /"0x00a171a5",/, 'the patch is registered');
+  assert.match(patches, /while \(ESI && MEMR8\(ESI\) == \(uint8_t\)0x2fu\) ESI = \(uint32_t\)\(ESI \+ 1u\);/,
+    'the leading slashes are stepped over');
+  assert.match(patches, /LIFT-PATCH 0x00a171a5 \(round 85\)/, 'and it carries its marker, which is what makes it idempotent');
+  // the text it replaces has to be what the lifter emits, or the patch is a no-op
+  assert.match(patches, /  uba00_4 = MEMR32\(u3300_4\);\\n  ESI = uba00_4;/);
+});
+
+test('round 85: a mod\'s Lua is put where the host Lua reads', () => {
+  // The engine ran the mod and Lua answered `cannot open //mods/<id>/main.lua:
+  // No such file or directory`: Lua opens through its own libc, which reads
+  // MEMFS, and only the game's own scripts were ever copied there.
+  const b = readFileSync(join(root, 'scripts', 'recomp', 'web', 'boot_web.mjs'), 'utf8');
+  assert.match(b, /const memfs = \(key, bytes\) => \{/);
+  assert.match(b, /if \(!\/\\\.lua\$\/i\.test\(key\)\) return;/, 'only the Lua: the rest is the FS shim\'s business');
+  assert.match(b, /replace\(\/\^c:\\\/isaac\\\/\/i, '\/'\)/, 'the guest key becomes a MEMFS path');
+  assert.match(b, /if \(ok\) memfs\(path, bytes\);/, 'written for a file that seeded');
+  assert.match(b, /lua into MEMFS/, 'and the stage says how many');
+});

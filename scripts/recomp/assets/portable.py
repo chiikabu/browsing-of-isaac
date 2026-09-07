@@ -479,6 +479,10 @@ PROVIDER_JS = r"""
     trail: P.trail || null,
     status: P.status,
     ready: (async function () {
+      // Round 84: only a build that fetches. The single-file build carries its
+      // payload inline and has no base, and prefetching it asked the page for
+      // `null/a0.bin` -- eight of those, no frames, a build that did not run.
+      if (!P.base) return ranges;
       await probeRanges();
       // Always pull every piece before the engine starts. jsDelivr's ranges
       // lie, so a window is a 19 MB GET; doing that mid-room is the freeze.

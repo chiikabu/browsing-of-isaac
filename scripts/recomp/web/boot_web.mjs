@@ -773,17 +773,37 @@ try {
   await stageOk('seed mods', async () => {
     if (!modsOn) { log('  mods=0: no mods, and no import row'); return 0; }
     try { modDb = await openModDb(); } catch (e) { log(`  mod store unavailable: ${e.message}`); modDb = null; }
+    // Round 85: a mod's Lua is opened by the host Lua's own libc, which reads
+    // through MEMFS -- the same reason the game's own scripts are copied there
+    // in the next stage. Seeding into the FS shim is not enough: the engine ran
+    // the mod and Lua answered `cannot open //mods/<id>/main.lua: No such file
+    // or directory`. So every .lua a mod carries goes to MEMFS as well, under
+    // the path the engine asks for (`/mods/<id>/...`, which is what `//mods/...`
+    // normalises to).
+    let luaFiles = 0;
+    const memfs = (key, bytes) => {
+      if (!/\.lua$/i.test(key)) return;
+      const at = String(key).replace(/^c:\/isaac\//i, '/').replace(/\/{2,}/g, '/');
+      if (at[0] !== '/') return;
+      try {
+        m.FS.mkdirTree(at.slice(0, at.lastIndexOf('/')));
+        m.FS.writeFile(at, bytes);
+        luaFiles += 1;
+      } catch (e) { log(`  ${at}: ${e.message}`); }
+    };
     const seed = (path, bytes) => {
       const pp = cstr(path), dp = m._malloc(bytes.length || 1);
       m.HEAPU8.set(bytes, dp);
       const ok = m._isaac_fs_seed(pp, dp, bytes.length);
       m._free(pp); m._free(dp);
+      if (ok) memfs(path, bytes);
       return !!ok;
     };
     const r = await seedMods(modDb, seed, log);
     log(`  ${r.mods} mod(s), ${r.files} file(s), ${(r.bytes / 1048576).toFixed(2)} MB`
       + (r.off ? `, ${r.off} off` : '') + (r.state ? `, ${r.state} state file(s)` : '')
-      + (r.skipped ? `, ${r.skipped} skipped` : ''));
+      + (r.skipped ? `, ${r.skipped} skipped` : '')
+      + (luaFiles ? `, ${luaFiles} lua into MEMFS` : ''));
     return r.files;
   });
   // --- the host Lua's libc reads scripts through MEMFS: put them there

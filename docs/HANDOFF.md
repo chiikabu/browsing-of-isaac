@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-06, recomp rounds 26-84: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-85: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -181,6 +181,16 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 85: two characters, and no mod had ever run** (§21.99).
+  Every mod in this port was inert since round 74 -- no sprite, no sound, no
+  Lua. `sub_00a17180` resolves every mod file from an index of **strings** and
+  never touches a filesystem, and this port builds a mod's path off an empty
+  base: it asked for `//mods/<id>/...` while the index holds `mods/<id>/...`.
+  The loader asked whether there was a main.lua, was told no, and skipped every
+  mod whole. The patch steps over the leading slashes. Then Lua answered
+  `cannot open //mods/<id>/main.lua` -- it reads through MEMFS, where only the
+  game's own scripts were copied -- so a mod's `.lua` goes there too. On a real
+  run: **the mod's main.lua runs and 19 of its files are read, against 0**.
 - **Round 84: the host's ranges are wrong, and not always the same way** (§21.98).
   Round 83 read a failed window as a blip. It was not: fetched whole, a chunk on
   jsDelivr is byte for byte what was uploaded; fetched as a **range**, the same
