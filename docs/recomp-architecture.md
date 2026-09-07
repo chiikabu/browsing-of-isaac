@@ -7495,3 +7495,45 @@ purpose: asking for 1 fails outright on a database that has already been
 repaired to 2. `drive_modpack.mjs --breakdb=1` poisons the origin exactly the
 way the driver did, before any page script runs; the import has to succeed
 anyway, and it does.
+
+### 21.103 Round 87: the credit, and the page reading the engine's mind
+
+A line in the bottom-left of the menu paper, white, in the game's own font:
+`ported by vun`. On that screen and nowhere else -- not in a room, not over the
+intro cutscene, not on character select.
+
+The drawing was the easy half: `menu_overlay.mjs` already owns the game's font,
+its atlases and a corner-canvas pattern (the FPS readout), so the credit is the
+same two passes -- a dark shadow at 3,3 and the white at 2,2 -- on its own
+surface. `#stage` is the 16:9 picture itself and the canvas fills it, so the
+letterbox is outside that box and `left:1%` is one percent into the game rather
+than into the black. The canvas is CREDIT_W of GAME_W wide, which makes the
+text come out at the size the game's own text is, instead of an eyeballed
+percentage.
+
+Knowing *when* was the real question, and the answer is a property of this port
+that had not been used before: **a guest VA is a wasm address.** `isaac_g(va)`
+is the identity (isaac_host.h) -- that is what GLOBAL_BASE is chosen to buy --
+so the page can read the engine's own variables with no host call and no
+export. `boot_web.mjs` now hands out `window.isaacGuest` for exactly that. It
+assembles words out of HEAPU8 by hand, because HEAPU8 is the only view this
+build exports and touching `m.HEAPU32` aborts the runtime with
+`'HEAPU32' was not exported`.
+
+The screen id was found rather than reverse-engineered: snapshot the static
+data region (0x00c00000..0x00cfe000) at each screen from the intro to a run,
+keep the words that stay small and change every time, and see which one walks
+cleanly. One did, at **0x00c79970**, and screenshots pinned what its values
+mean:
+
+    8  the intro cutscene      14  the menu paper       29  a run is up
+    9  the title               17  the challenges list  31  stats
+    11 the file select
+
+That is also how ONLINE turned out to be unreachable: Enter on it leaves the id
+at 14, because the EOS platform never initialises (all 82 EOS imports are
+stubbed). The credit is on 14 and 17; when ONLINE opens one day it will have an
+id of its own to add.
+
+The page polls four bytes every 200 ms. The address is in the game's own data,
+so it does not move when this project rebuilds.

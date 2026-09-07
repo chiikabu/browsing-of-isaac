@@ -412,3 +412,32 @@ test('round 86: the reader Worker parses as the script it becomes', () => {
   assert.equal(cooked.length, raw.length, 'nothing was eaten on the way to the Worker');
   assert.doesNotThrow(() => new Script(cooked), 'the Worker source parses');
 });
+
+test('round 87: the credit is drawn on the menu paper and nowhere else', () => {
+  // Bottom-left of the picture, in the game's own font. #stage IS the 16:9
+  // picture and the canvas fills it, so a percentage from the left edge is a
+  // percentage into the game rather than into the letterbox around it.
+  const ov = readFileSync(join(root, 'scripts', 'recomp', 'web', 'menu_overlay.mjs'), 'utf8');
+  assert.match(ov, /const CREDIT_TEXT = 'ported by vun';/, 'the text');
+  assert.match(ov, /creditEl\.id = 'credit';/, 'its own surface');
+  assert.match(ov, /left:1%;bottom:1\.2%/, 'bottom-left');
+  assert.match(ov, /const CREDIT_ON = new Set\(\[14, 17\]\);/,
+    'the paper and the challenges list, and no other screen');
+  // the same two passes the fps readout uses: a dark shadow, then the white
+  assert.match(ov, /drawText\(gg, CREDIT_TEXT, 3, 3, A\.atlas\);/);
+  assert.match(ov, /drawText\(gg, CREDIT_TEXT, 2, 2, A\.atlasWhite\);/);
+  // the canvas maps 1:1 onto game pixels, so the text comes out at the size the
+  // game's own text is -- CREDIT_W of GAME_W, not an arbitrary percentage
+  assert.match(ov, /\$\{\(CREDIT_W \/ GAME_W \* 100\)\.toFixed\(2\)\}%/);
+
+  // the screen id is read out of the engine's own memory, which this port can
+  // do because a guest VA is a wasm address (isaac_g is the identity)
+  const play = readFileSync(join(root, 'scripts', 'recomp', 'web', 'play.mjs'), 'utf8');
+  assert.match(play, /const MENU_ID_VA = 0x00c79970;/, 'the word the engine keeps the screen in');
+  assert.match(play, /editMenu\.setScreen\(readMenuId\(\)\)/, 'and the credit follows it');
+  const boot = readFileSync(join(root, 'scripts', 'recomp', 'web', 'boot_web.mjs'), 'utf8');
+  assert.match(boot, /window\.isaacGuest = \{/, 'the page can read guest memory');
+  // HEAPU32 is not exported by this build: touching it aborts the runtime
+  const bootCode = boot.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  assert.ok(!/m\.HEAPU32/.test(bootCode), 'and it does it through HEAPU8, the view this build exports');
+});

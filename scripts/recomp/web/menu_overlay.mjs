@@ -20,6 +20,8 @@
 // the engine's menu sounds through the page's AudioContext.
 
 const GAME_W = 480, GAME_H = 270, SCALE = 2;
+// the credit on the menu paper (round 87)
+const CREDIT_TEXT = 'ported by vun';
 
 function parseBmfont(buf) {
   const b = new Uint8Array(buf), dv = new DataView(buf);
@@ -150,7 +152,7 @@ export function createEditFileMenu(opts) {
   // readAsset (round 70) is how a build with no server hands over its own files
   const { stage, canvas, assetsUrl, readAsset, actions, injectKey } = opts;
   const log = opts.log || (() => {});
-  const state = { open: false, slot: 0, cursor: 0, message: null, fps: null, fpsOn: false, closing: false };
+  const state = { open: false, slot: 0, cursor: 0, message: null, fps: null, fpsOn: false, closing: false, creditOn: false };
   const M = menuAssets(opts);
   const { A, load, play, measure, drawText } = M;
   // Off on every load. N flips it for this visit only: it used to be remembered,
@@ -171,6 +173,19 @@ export function createEditFileMenu(opts) {
   fpsEl.style.cssText = 'position:absolute;left:1%;top:1.5%;width:12.5%;height:auto;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges;';
   fpsEl.hidden = true;
   stage.appendChild(fpsEl);
+
+  // Round 87: the credit, bottom-left of the picture, in the game's own font --
+  // on the menu paper and nowhere else. #stage is the 16:9 picture itself and
+  // the canvas fills it, so the letterbox is outside this box: 1% from the left
+  // edge here is 1% into the game, not into the black.
+  const CREDIT_W = 200, CREDIT_H = 28;                 // game px
+  const creditEl = document.createElement('canvas');
+  creditEl.id = 'credit';
+  creditEl.width = CREDIT_W * SCALE; creditEl.height = CREDIT_H * SCALE;
+  creditEl.style.cssText = `position:absolute;left:1%;bottom:1.2%;width:${(CREDIT_W / GAME_W * 100).toFixed(2)}%;`
+    + 'height:auto;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges;';
+  creditEl.hidden = true;
+  stage.appendChild(creditEl);
 
   // MODS is here because the import row in the game's own list is a mod, and a
   // mod loaded makes the run a modded one. This menu is the page's already.
@@ -217,6 +232,31 @@ export function createEditFileMenu(opts) {
     const text = `${Math.round(state.fps)}`;
     drawText(gg, text, 3, 3, A.atlas);
     drawText(gg, text, 2, 2, A.atlasWhite);
+  };
+
+  // The screen the engine says is up (menu_overlay draws nothing of its own
+  // here; play.mjs reads the id out of guest memory and hands it over). 14 is
+  // the menu paper -- NEW RUN / CONTINUE / ONLINE / CHALLENGES / STATS /
+  // OPTIONS -- and 17 the challenges list; 29 is a run, 8 the intro cutscene.
+  const CREDIT_ON = new Set([14, 17]);
+  const drawCredit = () => {
+    if (!M.isReady()) return;
+    const gg = creditEl.getContext('2d');
+    gg.imageSmoothingEnabled = false;
+    gg.clearRect(0, 0, creditEl.width, creditEl.height);
+    // a dark shadow a pixel down-right, then the white: the same two passes the
+    // fps readout uses, so it sits on light paper and dark rooms alike
+    drawText(gg, CREDIT_TEXT, 3, 3, A.atlas);
+    drawText(gg, CREDIT_TEXT, 2, 2, A.atlasWhite);
+  };
+  const setScreen = (id) => {
+    const want = CREDIT_ON.has(id | 0);
+    if (want === state.creditOn) return;
+    state.creditOn = want;
+    if (!want) { creditEl.hidden = true; return; }
+    if (!M.isReady()) { load().then(() => { if (state.creditOn) { creditEl.hidden = false; drawCredit(); } }).catch(() => {}); return; }
+    creditEl.hidden = false;
+    drawCredit();
   };
 
   const open = async (slot) => {
@@ -284,6 +324,9 @@ export function createEditFileMenu(opts) {
     rows: () => items(),
     current: () => items()[state.cursor] || null,
     setFps: (fps) => { state.fps = fps; if (state.fpsOn) { if (!M.isReady()) load().then(() => { fpsEl.hidden = false; drawFps(); }).catch(() => {}); else { fpsEl.hidden = false; drawFps(); } } },
+    // the screen the engine is on, so the credit knows whether to be there
+    setScreen,
+    creditShown: () => state.creditOn,
     preload: load,
     element: overlay,
   };

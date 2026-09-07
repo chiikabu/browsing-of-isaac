@@ -339,6 +339,7 @@ hooks.beforeMain = (m) => new Promise((resolve) => {
       const fpsEl = $('fps'); fpsEl.textContent = line; fpsEl.title = line + machine;   // the header's, live during play
       editMenu.setFps(fps);                                                          // the in-game FPS VIEWER, when on
     }, 1000);
+    watchScreen();
   };
   if (AUTOPLAY) { start(); return; }
   setStatus('press play');
@@ -392,6 +393,28 @@ $('reload-btn').addEventListener('click', () => location.reload());
 $('dismiss-btn').addEventListener('click', () => { $('error').hidden = true; });
 window.addEventListener('error', (ev) => showError('A script error', ev.message));
 window.addEventListener('unhandledrejection', (ev) => showError('The pipeline failed', String(ev.reason && ev.reason.message || ev.reason)));
+
+// ---- which screen the engine is on (round 87) --------------------------------------
+// The credit belongs on the menu paper and nowhere else -- not in a room, not
+// over the intro. The engine keeps the menu it is showing in a word of its own
+// static data, and in this port a guest VA is a wasm address (isaac_g is the
+// identity), so the page can just read it: boot_web's window.isaacGuest.
+//
+// Found by snapshotting the static region at each screen from the intro to a
+// run and keeping the words that were small and different every time; this one
+// was the only one that walked cleanly. Confirmed against screenshots:
+//   8 intro cutscene   9 title   11 file select   14 the menu paper
+//   17 challenges      29 a run is up            31 stats
+// The address is in the game's own data, so it does not move when we rebuild.
+const MENU_ID_VA = 0x00c79970;
+const readMenuId = () => {
+  const G = window.isaacGuest;
+  if (!G) return -1;
+  try { return G.u32(MENU_ID_VA) | 0; } catch (e) { return -1; }
+};
+// four bytes every 200 ms: the credit appears within a frame or two of the
+// paper and is gone the moment a run starts
+const watchScreen = () => setInterval(() => editMenu.setScreen(readMenuId()), 200);
 
 // ---- the EDIT FILE menu (round 52) -----------------------------------------------------
 // The save-select screen's DELETE FILE strip reads EDIT FILE (page_assets.py

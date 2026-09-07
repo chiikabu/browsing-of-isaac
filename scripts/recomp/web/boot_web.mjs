@@ -704,6 +704,23 @@ try {
   throw e;
 }
 
+// Round 87: the page can read guest memory, because in this port a guest VA IS
+// a wasm linear-memory address -- `isaac_g(va)` is the identity (isaac_host.h),
+// which is what GLOBAL_BASE is chosen to buy. That makes engine state readable
+// from here for a few bytes a frame and no host call: the title-screen credit
+// asks whether a run is up by looking at the game's own pointer.
+// HEAPU8 is the only view this build exports (touching m.HEAPU32 aborts the
+// runtime with "'HEAPU32' was not exported"), so the word is assembled here.
+window.isaacGuest = {
+  u8: (va) => { const H = m && m.HEAPU8; return H ? H[va >>> 0] : 0; },
+  u32: (va) => {
+    const H = m && m.HEAPU8;
+    if (!H) return 0;
+    va >>>= 0;
+    return (H[va] | (H[va + 1] << 8) | (H[va + 2] << 16) | (H[va + 3] << 24)) >>> 0;
+  },
+};
+
 async function stageOk(name, fn) {
   log(`=== ${name} ===`);
   try {

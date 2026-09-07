@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-06, recomp rounds 26-86c: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-87: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -181,6 +181,16 @@ REQUIRE emsdk on PATH:
   `ISAAC_AUDIO_TRACE=1` traces every source (host and JS sides);
   `tests/recomp-audio.test.js` 10 (the EM_JS bodies run in node against a
   fake AudioContext), selftest 316 (20 `audio:` checks on a fake clock).
+- **Round 87: the credit, and the page reading the engine's mind** (§21.103).
+  `ported by vun` in the game's own font, bottom-left of the menu paper, on that
+  screen and nowhere else. The useful half is the mechanism: **a guest VA is a
+  wasm address** (`isaac_g` is the identity), so `window.isaacGuest` lets the
+  page read engine variables with no host call and no export -- through HEAPU8,
+  since `m.HEAPU32` is not exported and touching it aborts the runtime. The
+  screen id lives at **0x00c79970** and was found by diffing the static region
+  across screens: 8 intro, 9 title, 11 file select, **14 the menu paper**, 17
+  challenges, 29 a run, 31 stats. ONLINE never opens (the id stays 14) because
+  every EOS import is stubbed.
 - **A push is not a deploy.** After every push:
   ode scripts/recomp/assets/check_deployed.mjs\ -- it hashes what the CDN and
   Pages actually serve against what was built here. The module lives in the
