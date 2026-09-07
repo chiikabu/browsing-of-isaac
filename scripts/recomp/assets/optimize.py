@@ -33,6 +33,17 @@ import archive as ar
 BLOCK_BYTES = ar.BLOCK          # the format's 0x400 decode window
 BUDGET_ALL = 1 << 30            # a budget no block can spend: static Huffman wherever it fits  # noqa: E402
 
+# Round 88: one deflate stream per entry instead of one per 0x400 block, so a
+# match can reach into the block before it. THE WINDOW IS NOT A FREE PARAMETER.
+# The engine inflates in miniz's WRAPPING output mode -- host_fastpath.c takes
+# the ring mask from the caller's buffer, ((out_next - out_start) + out_size) - 1
+# -- and that buffer is one block. Measured on the page: 10 bits boots and
+# checksums every entry; 11 and 12 bits wedge the engine in an out-of-memory
+# retry loop, because a match reaches past the ring and the garbage that comes
+# back is parsed as a length. zlib never emits a distance equal to the whole
+# window, so 10 bits stays strictly inside 0x400.
+STREAM_WBITS = 10               # noqa: E402
+
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
@@ -703,7 +714,8 @@ def cmd_huffman(args) -> int:
                 items.append({"h1": e.h1, "h2": e.h2, "src": a, "entry": e})   # stored: not ours
             else:
                 items.append({"h1": e.h1, "h2": e.h2, "data": data, "mode": "deflate",
-                              "fixed_cost": BUDGET_ALL if args.cost is None else args.cost})
+                              "fixed_cost": BUDGET_ALL if args.cost is None else args.cost,
+                              "stream_wbits": None if args.no_stream else STREAM_WBITS})
                 deflate += 1
         r = ar.write_archive(args.out, a.version, items)
     before = os.path.getsize(args.archive)
@@ -821,6 +833,10 @@ def main(argv=None) -> int:
                    help="most bytes a 0x400 block may grow to stop carrying a Huffman table; "
                         "the default takes static Huffman wherever the format allows it "
                         "(+0.93%% of the shipping bundle, and the inflate at a fifth of the cost)")
+    p.add_argument("--no-stream", action="store_true",
+                   help="keep a separate deflate stream per 0x400 block (round 88 uses one per "
+                        "entry, which the reader has always been able to take: 12.7 MB smaller "
+                        "at the same decode cost)")
     p.set_defaults(fn=cmd_huffman)
     p = sub.add_parser("store", help="re-encode already-compressed entries as stored bytes (round 72)")
     p.add_argument("archive"); p.add_argument("out")

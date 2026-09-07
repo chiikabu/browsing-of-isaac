@@ -121,3 +121,32 @@ test('the archive key form is the one the tables were built with', () => {
   assert.notEqual(djb2('achievements.xml'), djb2('resources/achievements.xml'), 'the prefix is part of the key');
   assert.equal(typeof fnv('resources/music/x.ogg'), 'number');
 });
+
+test('round 88: an entry is one deflate stream, and its window may not outrun the ring', () => {
+  // The format cuts an entry into 0x400-byte blocks, each its own piece, and the
+  // encoder built a FRESH deflate stream for every one -- so no match reached
+  // back past 1 KB and every block started with no history. The reader never
+  // asked for that: 0x00a89f80 feeds every piece into the SAME tinfl state with
+  // TINFL_FLAG_HAS_MORE_INPUT until the last. One compressor per entry with
+  // Z_SYNC_FLUSH at each boundary keeps the boundary and the window, stays
+  // static-Huffman (round 75, so no table is ever built), and is 12.7 MB
+  // smaller across the two deflate archives.
+  const a = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'archive.py'), 'utf8');
+  assert.match(a, /def _stream_pieces\(data: bytes, level: int, wbits: int\)/, 'the streamed form exists');
+  assert.match(a, /zlib\.Z_SYNC_FLUSH/, 'pieces are joined with a sync flush, not a full flush');
+  assert.match(a, /zlib\.Z_FIXED/, 'and stay static Huffman, so the decoder still builds no table');
+  // it may only ever replace the per-block form when it is actually smaller
+  assert.match(a, /if streamed is not None and sum\(len\(p\) for p, _ in streamed\) < sum\(len\(p\) for p, _ in pieces\)/,
+    'the streamed form is used only when it wins');
+
+  // THE WINDOW IS NOT A FREE PARAMETER. The engine inflates in miniz's WRAPPING
+  // output mode: host_fastpath.c takes the ring mask from the caller's buffer
+  // ((out_next - out_start) + out_size - 1), and that buffer is one 0x400 block.
+  // Measured, on the real page: 10 bits boots and checksums every entry; 11 and
+  // 12 bits wedge the engine in an out-of-memory retry loop, because a match
+  // reaches past the ring and the garbage it reads is parsed as a length.
+  const o = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'optimize.py'), 'utf8');
+  assert.match(o, /STREAM_WBITS = 10/, 'the window is pinned at one block');
+  assert.ok(!/STREAM_WBITS = (1[1-9]|[2-9]\d)/.test(o),
+    'a larger window decodes wrong in the engine -- 11 and 12 were measured wedging it');
+});

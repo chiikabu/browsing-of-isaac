@@ -1,4 +1,4 @@
-# Handoff — read this first (2026-09-06, recomp rounds 26-87: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
+# Handoff — read this first (2026-09-06, recomp rounds 26-88: fixes, video, bundle, automated player, console, saves, music, the Chromebook budget, portable builds, mods, the giant functions split, below the cap)
 
 One page to orient a fresh session. Everything below is committed on
 `codex/decomp`. Do the two session-start steps in AGENTS.md, then pick a front.
@@ -191,6 +191,18 @@ REQUIRE emsdk on PATH:
   in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
   2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
   options, 16 mods, 19 online.
+- **Round 88: one deflate stream per entry** (§21.105). The packer built a fresh
+  deflate stream for every 0x400 block, so no match reached past a kilobyte --
+  but the reader feeds every piece into the SAME tinfl state
+  (`TINFL_FLAG_HAS_MORE_INPUT`), so one compressor per entry with
+  `Z_SYNC_FLUSH` at the boundaries is a form it has always been able to read.
+  Static Huffman throughout, so round 75 stands and no table is ever built.
+  **-12.7 MB** (dist 648.6 -> 635.8 MB raw, transfer 598.9 -> 585.6). The
+  window is pinned at **10 bits** and must stay there: the engine inflates into
+  a WRAPPING ring one block wide, and 11 or 12 bits wedges it in an
+  out-of-memory retry loop. Verified with `?ISAAC_ARCHIVE_VERIFY=1` over every
+  entry in the browser, 13,800 frames, drivers 37/15/11, and a 4x-throttled A/B
+  showing the same boot and the same window count.
 - **Round 87b: a correlate is not a variable** (§21.104). The first version read
   a .data word that had tracked the screen all session and reported a different
   number on another machine -- the index shows it has **one read and one write,

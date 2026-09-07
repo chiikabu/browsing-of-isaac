@@ -307,8 +307,18 @@ test('round 75: huffman re-encodes the blocks and not the bytes', (t) => {
     // the budget does what it says: more allowance, more static blocks, more bytes
     assert.ok(sizes['0'] <= sizes['128'], `cost 0 (${sizes['0']}) is no larger than cost 128 (${sizes['128']})`);
     assert.ok(sizes['128'] <= sizes['1000000'], `cost 128 (${sizes['128']}) is no larger than all static (${sizes['1000000']})`);
-    // and the knob is a knob: the two ends do not produce the same file
-    assert.ok(!readFileSync(join(dir, 'v2-c0.a')).equals(readFileSync(join(dir, 'v2-c1000000.a'))),
+    // And the knob is a knob: the two ends do not produce the same file. This
+    // has to ask for the per-block form (round 88), because the streamed one is
+    // static Huffman whatever the budget says -- when it wins, and it usually
+    // does, both ends land on the same bytes. The budget still decides what the
+    // streamed form has to beat, which is why the ordering above still holds.
+    for (const cost of ['0', '1000000']) {
+      const b = join(dir, `v2-noStream-c${cost}.a`);
+      const r = spawnSync(python, [opt, 'huffman', a, b, '--cost', cost, '--no-stream'], { encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.match(r.stdout, /0 verify failures/, `cost ${cost} --no-stream: every entry decodes to the same bytes`);
+    }
+    assert.ok(!readFileSync(join(dir, 'v2-noStream-c0.a')).equals(readFileSync(join(dir, 'v2-noStream-c1000000.a'))),
       'the budget changes the encoding, not just the report');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

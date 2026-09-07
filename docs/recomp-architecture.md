@@ -7582,3 +7582,68 @@ EOS stubs refusing to let the menu in. The 82 EOS imports are still stubs, but
 the menu itself opens.
 
 The credit is on 3, 7 and 19 -- the paper, challenges and online.
+
+### 21.105 Round 88: one deflate stream per entry, and the ring that bounds it
+
+An archive entry is cut into 0x400-byte blocks, each written as its own piece
+with a length prefix, and `miniz_encode` built a **fresh deflate stream for every
+one of them**. So no match could reach back past a kilobyte and every block
+started with an empty history -- on 51 MB of XML, that is most of the
+compression thrown away.
+
+The reader had never asked for it. `0x00a89f80` feeds every piece into the SAME
+tinfl state, passing `TINFL_FLAG_HAS_MORE_INPUT` (flags = 2) until the last one:
+
+    0x00a89fbc  xor eax, 1
+    0x00a89fbf  add eax, eax        ; flags = (!last) * 2
+    0x00a89fcf  call 0xa85710       ; tinfl_decompress, state at [ebx+0xc]
+
+So the stream is continuous on the decoder's side, and the encoder can be too:
+one compressor per entry, `Z_SYNC_FLUSH` at each boundary instead of
+`Z_FULL_FLUSH` -- the same byte-aligned piece boundary the format needs, without
+dropping the dictionary -- and `Z_FIXED` throughout, so the blocks stay static
+Huffman and the decoder still never builds a table (round 75 stands).
+
+**The window is not a free parameter.** The engine inflates in miniz's WRAPPING
+output mode: the ring mask comes from the caller's buffer,
+`((out_next - out_start) + out_size) - 1`, asserted a power of two -- and that
+buffer is one block. Measured on the page, not reasoned about:
+
+    window 10 bits (1 KB)   boots, and checksums every entry
+    window 11 bits (2 KB)   the engine wedges
+    window 12 bits (4 KB)   the engine wedges
+
+The wedge is not a crash. A match reaches past the ring, the garbage it reads is
+parsed as a length, and the guest allocates against it until
+
+    [isaac][heap] OUT OF MEMORY: malloc(65550) failed with 402605384 bytes live
+                  and a 384 MiB arena
+
+and then retries forever. The first symptom was "the browser hangs while node is
+fine", which cost an hour of looking in the wrong place; the console said it in
+one line. zlib never emits a distance equal to the whole window, so 10 bits
+stays strictly inside 0x400.
+
+    afterbirthp.a   336.86 -> 324.18 MB   (-12.68)
+    afterbirth.a     65.85 ->  65.79 MB   (-0.05)
+    the dist          648.6 -> 635.8 MB raw; transfer 598.9 -> 585.6 MB
+
+Verified rather than assumed. `?ISAAC_ARCHIVE_VERIFY=1` makes the mount read and
+checksum **every entry through the engine's own decoder in the browser**: no
+mismatch, and the game then ran 13,800 frames at ~17 ms. Drivers: mods 37/37,
+saves 15/15, EDIT FILE 11/11. And the A/B that matters, at a 4x CPU throttle:
+
+                     boot to a run    play fps    windows read
+    as shipped          22,873 ms       51.9      204 / 202.9 MB
+    streamed            22,890 ms       54.0      204 / 202.1 MB
+
+Same boot, same windows, the frame rate if anything better -- which is what a
+smaller archive with an unchanged block type should do.
+
+What was measured and left alone: brotli over the windowed chunks (94% on
+afterbirthp, ~19 MB, but it needs a decoder in the page and a decompress on
+every window read); duplicate entry content (3.09 MB across 11,364 entries, and
+the table can already point two keys at one extent, so it is there to take if it
+ever grows); shadowed entries (0.8 MB, already handled); and videos, music, sfx
+and graphics, which are at entropy already -- gzip and brotli both return 100.0%
+of what they are given.

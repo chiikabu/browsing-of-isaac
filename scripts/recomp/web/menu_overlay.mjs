@@ -239,10 +239,10 @@ export function createEditFileMenu(opts) {
 
   // The screen the engine says is up: play.mjs reads MenuManager+0x40 out of
   // guest memory and hands it over. 3 is the menu paper -- NEW RUN / CONTINUE /
-  // ONLINE / CHALLENGES / STATS / OPTIONS -- with 19 online and 7 challenges,
-  // the three the credit was asked for. 5 is a run, and -1 the intro, before
-  // the manager exists at all.
-  const CREDIT_ON = new Set([3, 7, 19]);
+  // ONLINE / CHALLENGES / STATS / OPTIONS -- and the credit follows the rows
+  // off it: 7 challenges, 9 stats, 10 options, 19 online. Not 5 (a run), not
+  // 16 (the mods sheet), not -1 (the intro, before the manager exists).
+  const CREDIT_ON = new Set([3, 7, 9, 10, 19]);
   const drawCredit = () => {
     if (!M.isReady()) return;
     const gg = creditEl.getContext('2d');

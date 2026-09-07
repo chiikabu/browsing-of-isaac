@@ -385,8 +385,44 @@ def _best_piece(block: bytes, final: bool, level: int, fixed_cost: int | None) -
     return dyn
 
 
+def _stream_pieces(data: bytes, level: int, wbits: int) -> list[tuple[bytes, bool]] | None:
+    """Round 88: one compressor for the whole entry instead of one per block.
+
+    The format splits an entry into 0x400-byte blocks, each its own piece with a
+    length prefix, and miniz_encode built a FRESH deflate stream for every one
+    of them -- so no match could reach back past 1 KB and every block started
+    with an empty history. The reader never asked for that: 0x00a89f80 feeds
+    every piece into the SAME tinfl state, passing TINFL_FLAG_HAS_MORE_INPUT
+    (flags = 2) until the last one, so the stream is continuous on its side.
+
+    So: one compressor, Z_SYNC_FLUSH at each boundary (which ends a block on a
+    byte boundary exactly like Z_FULL_FLUSH but keeps the window), and
+    Z_FIXED throughout -- static Huffman, the block type round 75 chose so the
+    decoder never builds a table. Same decode work, fewer bytes.
+
+    `wbits` bounds how far a match may reach. The engine inflates in miniz's
+    WRAPPING output mode, so a distance may not outrun the ring it decodes into;
+    this is the knob that keeps it inside. Returns None when the entry cannot be
+    expressed this way (a piece over 0x7ff, or a non-final piece of exactly
+    0x400, which is how the reader is told the rest is stored).
+    """
+    n = (len(data) + BLOCK - 1) // BLOCK
+    if n == 0:
+        return None
+    c = zlib.compressobj(level, zlib.DEFLATED, -wbits, 9, zlib.Z_FIXED)
+    pieces = []
+    for i in range(n):
+        block = data[i * BLOCK:(i + 1) * BLOCK]
+        final = i == n - 1
+        piece = c.compress(block) + c.flush(zlib.Z_FINISH if final else zlib.Z_SYNC_FLUSH)
+        if not _piece_ok(piece, final):
+            return None
+        pieces.append((piece, final))
+    return pieces
+
+
 def miniz_encode(data: bytes, h2: int, level: int = 9, mode: str = "auto",
-                 fixed_cost: int | None = None) -> bytes:
+                 fixed_cost: int | None = None, stream_wbits: int | None = None) -> bytes:
     """Encode a version-2 entry payload. mode: auto (smaller of deflate/stored), deflate, stored.
     fixed_cost (round 75): how many bytes a block may grow to use static Huffman."""
     size = len(data)
@@ -414,6 +450,12 @@ def miniz_encode(data: bytes, h2: int, level: int = 9, mode: str = "auto",
             if len(piece) > PIECE_MAX:
                 raise PieceError("deflate piece of %d bytes > 0x7ff" % len(piece))
             pieces.append((piece, final))
+    # the streamed form only replaces the per-block one when it is actually
+    # smaller, so this can never cost bytes
+    if stream_wbits is not None and mode in ("auto", "deflate") and pieces is not None:
+        streamed = _stream_pieces(data, level, stream_wbits)
+        if streamed is not None and sum(len(p) for p, _ in streamed) < sum(len(p) for p, _ in pieces):
+            pieces = streamed
     stored_ok = size > BLOCK  # the first piece must be a full, non-final block
     if mode == "stored" and not stored_ok:
         raise PieceError("stored mode needs more than 0x400 bytes (the first piece must be full and non-final)")
@@ -616,18 +658,19 @@ class Archive:
 # ---------------------------------------------------------------------------
 
 def encode_payload(version: int, data: bytes, h2: int, level: int = 9, mode: str = "auto",
-                   fixed_cost: int | None = None) -> bytes:
+                   fixed_cost: int | None = None, stream_wbits: int | None = None) -> bytes:
     if version == 0:
         return raw_encode(data, h2)
     if version == 2:
-        return miniz_encode(data, h2, level=level, mode=mode, fixed_cost=fixed_cost)
+        return miniz_encode(data, h2, level=level, mode=mode, fixed_cost=fixed_cost,
+                            stream_wbits=stream_wbits)
     if version == 1:
         raise PieceError("version 1 (LZW) entries cannot be re-encoded; repack with --version 0 or 2")
     raise PieceError("archive version %d is not supported" % version)
 
 
 def write_archive(path: str, version: int, items: list[dict], level: int = 9, mode: str = "auto",
-                  fixed_cost: int | None = None) -> dict:
+                  fixed_cost: int | None = None, stream_wbits: int | None = None) -> dict:
     """items, in table order: {'h1','h2', 'raw': packed bytes, 'size', 'x'} (passthrough),
     {'h1','h2', 'src': Archive, 'entry': Entry} (passthrough copied from the source archive at
     write time, so a large archive is never held in memory) or {'h1','h2','data': decoded bytes}
@@ -656,7 +699,8 @@ def write_archive(path: str, version: int, items: list[dict], level: int = 9, mo
             else:
                 data = it["data"]
                 raw = encode_payload(version, data, h2, level=level, mode=it.get("mode", mode),
-                                     fixed_cost=it.get("fixed_cost", fixed_cost))
+                                     fixed_cost=it.get("fixed_cost", fixed_cost),
+                                     stream_wbits=it.get("stream_wbits", stream_wbits))
                 size = len(data)
                 x = mount_checksum(data)
                 encoded += 1

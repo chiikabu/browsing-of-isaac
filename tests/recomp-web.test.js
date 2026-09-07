@@ -1,4 +1,4 @@
-// Web build of the recomp boot (round 13): the GL surface has two backends --
+﻿// Web build of the recomp boot (round 13): the GL surface has two backends --
 // the headless fake in host_shims_gl.c (node profile) and the WebGL2
 // forwarder in host_gl_webgl.c (build_boot.py --web). Every opengl32 entry
 // point the shim table knows must have a body in BOTH, and the fake bodies
@@ -421,8 +421,8 @@ test('round 87: the credit is drawn on the menu paper and nowhere else', () => {
   assert.match(ov, /const CREDIT_TEXT = 'ported by vun';/, 'the text');
   assert.match(ov, /creditEl\.id = 'credit';/, 'its own surface');
   assert.match(ov, /left:1%;bottom:1\.2%/, 'bottom-left');
-  assert.match(ov, /const CREDIT_ON = new Set\(\[3, 7, 19\]\);/,
-    'the paper, challenges and online, and no other screen');
+  assert.match(ov, /const CREDIT_ON = new Set\(\[3, 7, 9, 10, 19\]\);/,
+    'the paper and the rows off it, and no other screen');
   // the same two passes the fps readout uses: a dark shadow, then the white
   assert.match(ov, /drawText\(gg, CREDIT_TEXT, 3, 3, A\.atlas\);/);
   assert.match(ov, /drawText\(gg, CREDIT_TEXT, 2, 2, A\.atlasWhite\);/);
