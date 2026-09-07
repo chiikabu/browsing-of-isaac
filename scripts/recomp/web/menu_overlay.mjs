@@ -178,11 +178,14 @@ export function createEditFileMenu(opts) {
   // on the menu paper and nowhere else. #stage is the 16:9 picture itself and
   // the canvas fills it, so the letterbox is outside this box: 1% from the left
   // edge here is 1% into the game, not into the black.
-  const CREDIT_W = 200, CREDIT_H = 28;                 // game px
+  // CREDIT_ZOOM is the only knob: 1 is the size of the game's own menu text,
+  // which reads as loud for a credit. The canvas keeps its game-pixel geometry
+  // either way -- only the box it is shown in shrinks, so the text stays crisp.
+  const CREDIT_W = 200, CREDIT_H = 28, CREDIT_ZOOM = 0.72;   // game px, and the size it is shown at
   const creditEl = document.createElement('canvas');
   creditEl.id = 'credit';
   creditEl.width = CREDIT_W * SCALE; creditEl.height = CREDIT_H * SCALE;
-  creditEl.style.cssText = `position:absolute;left:1%;bottom:1.2%;width:${(CREDIT_W / GAME_W * 100).toFixed(2)}%;`
+  creditEl.style.cssText = `position:absolute;left:1%;bottom:1.2%;width:${(CREDIT_W / GAME_W * 100 * CREDIT_ZOOM).toFixed(2)}%;`
     + 'height:auto;pointer-events:none;image-rendering:pixelated;image-rendering:crisp-edges;';
   creditEl.hidden = true;
   stage.appendChild(creditEl);

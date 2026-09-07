@@ -426,9 +426,10 @@ test('round 87: the credit is drawn on the menu paper and nowhere else', () => {
   // the same two passes the fps readout uses: a dark shadow, then the white
   assert.match(ov, /drawText\(gg, CREDIT_TEXT, 3, 3, A\.atlas\);/);
   assert.match(ov, /drawText\(gg, CREDIT_TEXT, 2, 2, A\.atlasWhite\);/);
-  // the canvas maps 1:1 onto game pixels, so the text comes out at the size the
-  // game's own text is -- CREDIT_W of GAME_W, not an arbitrary percentage
-  assert.match(ov, /\$\{\(CREDIT_W \/ GAME_W \* 100\)\.toFixed\(2\)\}%/);
+  // the canvas keeps game-pixel geometry and only the box it is shown in
+  // shrinks, so the size is one knob and the glyphs stay crisp
+  assert.match(ov, /\$\{\(CREDIT_W \/ GAME_W \* 100 \* CREDIT_ZOOM\)\.toFixed\(2\)\}%/);
+  assert.match(ov, /CREDIT_ZOOM = 0\.\d+;/, 'and it is smaller than the game\'s own menu text');
 
   // the screen id is read out of the engine's own memory, which this port can
   // do because a guest VA is a wasm address (isaac_g is the identity)
