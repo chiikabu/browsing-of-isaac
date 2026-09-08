@@ -455,9 +455,22 @@ PROVIDER_JS = r"""
     for (var j = 0; j < parts.length; j++) { out.set(parts[j], at); at += parts[j].length; }
     return out;
   }
-  async function piece(s, i) {
+  // Round 89d: two callers can want the same chunk at once now -- the boot
+  // reading it and the background prefetch pulling it -- and each was a whole
+  // 19 MB GET of its own. One request, both waiters.
+  var flight = new Map();
+  function piece(s, i) {
     var key = s + ':' + i, hit = cache.get(key);
-    if (hit) return hit;
+    if (hit) return Promise.resolve(hit);
+    var busy = flight.get(key);
+    if (busy) return busy;
+    var pr = piece1(s, i);
+    flight.set(key, pr);
+    return pr.then(function (u) { flight.delete(key); return u; },
+                   function (e) { flight.delete(key); throw e; });
+  }
+  async function piece1(s, i) {
+    var key = s + ':' + i;
     var r = await fetch(name(s, i));
     if (!r.ok) throw new Error('piece ' + key + ': HTTP ' + r.status);
     note(s, i);
@@ -567,8 +580,33 @@ PROVIDER_JS = r"""
   // how long the chunk is, so the probe requires that the total in Content-Range
   // equals that length. Missing the header, or a mismatch, drops to whole GETs,
   // which are exact on that host.
+  // Round 89d: a probe is only worth asking where the answer holds. Measured on
+  // this project's CDN: every ranged read comes back FOUR bytes short of what
+  // was asked for -- 64 -> 60, 65536 -> 65532, every chunk, wrong bytes -- and
+  // half an hour later, from another edge, the same probe returns its 64 bytes
+  // and the right Content-Range total and passes. A pass therefore says nothing
+  // about the read that follows it, and the run pays for that discovery in the
+  // middle of a room. Where the host is known to do this, do not ask.
+  var NO_RANGES = /(^|\.)jsdelivr\.net$/i;
+  function hostOf(u) {
+    try { return new URL(u, typeof location !== 'undefined' ? location.href : undefined).hostname; }
+    catch (e) { return ''; }
+  }
+  // ?noranges=1 forces the whole-chunk path, which is what the CDN build runs.
+  // Without it that path can only be tested by deploying, and it is the half
+  // that the trail-driven prefetch lives in.
+  function forcedOff() {
+    try { return new URLSearchParams(location.search).get('noranges') === '1'; }
+    catch (e) { return false; }
+  }
   async function probeRanges() {
     if (!P.base) return false;
+    if (forcedOff()) { ranges = false; P.rangesWhy = 'ranges turned off by ?noranges=1'; return false; }
+    if (NO_RANGES.test(hostOf(P.base))) {
+      ranges = false;
+      P.rangesWhy = 'this CDN answers ranges four bytes short, and not every time (rounds 84, 89d)';
+      return false;
+    }
     var b = S.findIndex(function (st) { return !st.gz; });
     if (b < 0) return false;
     // Round 84: four chunks, not one. jsDelivr answers a range with the wrong
@@ -581,17 +619,38 @@ PROVIDER_JS = r"""
       for (var k = 0; k < picks.length; k++) {
         var i = picks[k], want = chunkLen(b, i);
         if (want < 0) { ranges = false; P.rangesWhy = 'chunk length unknown'; return false; }
-        var r = await fetch(name(b, i), { headers: { Range: 'bytes=0-63' } });
+        // 1 KiB, not 64 bytes: the deficit that gave this away was four bytes,
+        // and a 64-byte answer that is four short still looks like a plausible
+        // read. The bigger ask costs nothing and fails louder.
+        var r = await fetch(name(b, i), { headers: { Range: 'bytes=0-1023' } });
         if (r.status !== 206) { ranges = false; P.rangesWhy = 'the host answered ' + r.status + ' for a range'; return false; }
-        var got = (await r.arrayBuffer()).byteLength;
+        var head = new Uint8Array(await r.arrayBuffer());
         var cr = r.headers.get('content-range') || '';
         var total = /\/(\d+)\s*$/.exec(cr);
         var claimed = total ? Number(total[1]) : -1;
-        if (got !== 64 || claimed !== want) {
+        if (head.length !== 1024 || claimed !== want) {
           ranges = false;
-          P.rangesWhy = 'chunk ' + i + ': a 64-byte range came back as ' + got + ' byte(s)'
+          P.rangesWhy = 'chunk ' + i + ': a 1024-byte range came back as ' + head.length + ' byte(s)'
             + (claimed >= 0 ? ' and the host calls that file ' + claimed + ' bytes, not ' + want : ' with no Content-Range total');
           return false;
+        }
+        // and the same bytes have to come back from a range that merely
+        // overlaps them. A host serving from the wrong offset answers both
+        // with the right LENGTH and disagrees with itself about the contents.
+        var r2 = await fetch(name(b, i), { headers: { Range: 'bytes=512-1535' } });
+        if (r2.status !== 206) { ranges = false; P.rangesWhy = 'the host answered ' + r2.status + ' for the second range'; return false; }
+        var mid = new Uint8Array(await r2.arrayBuffer());
+        if (mid.length !== 1024) {
+          ranges = false;
+          P.rangesWhy = 'chunk ' + i + ': an overlapping 1024-byte range came back as ' + mid.length + ' byte(s)';
+          return false;
+        }
+        for (var q = 0; q < 512; q++) {
+          if (mid[q] !== head[512 + q]) {
+            ranges = false;
+            P.rangesWhy = 'chunk ' + i + ': two ranges over the same bytes disagree at ' + (512 + q);
+            return false;
+          }
         }
       }
       ranges = true;
@@ -604,10 +663,55 @@ PROVIDER_JS = r"""
     if (typeof st.bytes === 'number' && st.size) return Math.ceil(st.bytes / st.size);
     return 0;
   }
-  // When ranges cannot be trusted every window is a whole GET of a 19 MB piece.
-  // Fetch every piece now, six at a time, so a later room does not stall on one.
+  // When ranges cannot be trusted every window is a whole GET of a 19 MB piece,
+  // so the pieces are pulled up front rather than one per stall in a room.
+  function fetchList(jobs, width) {
+    var next = 0;
+    async function worker() {
+      for (;;) {
+        var k = next++;
+        if (k >= jobs.length) return;
+        try { await piece(jobs[k][0], jobs[k][1]); } catch (e) { /* a later read asks again */ }
+      }
+    }
+    var crew = [], w;
+    for (w = 0; w < Math.min(width, jobs.length); w++) crew.push(worker());
+    return Promise.all(crew);
+  }
+  // Which chunks the boot itself reads. The trail is the list of reads the last
+  // boot made, in order, and the layout puts them near each other -- so this is
+  // a real subset, not a formality: 15 chunks of 28 on the build that added it.
+  function trailChunks() {
+    var t = P.trail;
+    if (!t || !t.length || !P.files) return null;
+    var need = [], seen = {}, j, i;
+    // Part A first, whatever the trail says. It is read whole, it holds the
+    // module, and nothing runs until it is here -- it must not be queued behind
+    // the archive at the background width.
+    for (j = 0; j < S.length; j++) {
+      if (!S[j].gz || S[j].size <= WIN) continue;
+      for (i = 0; i < count(j); i++) { seen[j + ':' + i] = 1; need.push([j, i]); }
+    }
+    for (j = 0; j < t.length; j++) {
+      var f = P.files[t[j][0]];
+      if (!f) continue;
+      var st = S[f.s];
+      if (!st || st.size <= WIN) continue;
+      var a = f.at + t[j][1], b = a + t[j][2] - 1;
+      for (i = Math.floor(a / st.size); i <= Math.floor(b / st.size); i++) {
+        var k = f.s + ':' + i;
+        if (!seen[k] && i < count(f.s)) { seen[k] = 1; need.push([f.s, i]); }
+      }
+    }
+    return need.length ? { need: need, seen: seen } : null;
+  }
+  // Round 89d: this used to pull every chunk before the first frame -- 532 MB
+  // of stream b to serve the 175 MB the boot actually reads. The trail says
+  // which 285 MB of that the boot will touch; those are what the first frame
+  // waits for. The rest is what a run might later wander into, and it comes
+  // down behind the game rather than in front of it.
   async function prefetchAll() {
-    var jobs = [], s, i, n;
+    var all = [], s, i, n;
     for (s = 0; s < S.length; s++) {
       // Round 89: a stream whose piece IS a window has nothing to amortise -- a
       // whole GET costs exactly what the read wanted. Pulling all of those
@@ -615,19 +719,17 @@ PROVIDER_JS = r"""
       // touches: measured at 724 MB against 175.
       if (S[s].size <= WIN) continue;
       n = count(s);
-      for (i = 0; i < n; i++) jobs.push([s, i]);
+      for (i = 0; i < n; i++) all.push([s, i]);
     }
-    var next = 0;
-    async function worker() {
-      for (;;) {
-        var k = next++;
-        if (k >= jobs.length) return;
-        await piece(jobs[k][0], jobs[k][1]);
-      }
-    }
-    var crew = [], w;
-    for (w = 0; w < Math.min(6, jobs.length); w++) crew.push(worker());
-    await Promise.all(crew);
+    var t = trailChunks();
+    if (!t) { await fetchList(all, 6); return null; }
+    var rest = [];
+    for (i = 0; i < all.length; i++) if (!t.seen[all[i][0] + ':' + all[i][1]]) rest.push(all[i]);
+    // what the first frame waits for, and what follows it down
+    P.prefetch = { first: t.need.length, rest: rest.length, of: all.length };
+    await fetchList(t.need, 6);
+    // narrower than the six above on purpose: this runs while the game does
+    return rest.length ? function () { return fetchList(rest, 2); } : null;
   }
   window.isaacPortable = {
     manifest: P.manifest,
@@ -640,13 +742,15 @@ PROVIDER_JS = r"""
       // `null/a0.bin` -- eight of those, no frames, a build that did not run.
       if (!P.base) return ranges;
       await probeRanges();
-      // Always pull every piece before the engine starts. jsDelivr's ranges
-      // lie, so a window is a 19 MB GET; doing that mid-room is the freeze.
-      //
-      await prefetchAll();
+      // Pull the pieces the boot reads before the engine starts. jsDelivr's
+      // ranges lie, so a window is a 19 MB GET; doing that mid-room is the
+      // freeze. What the boot does NOT read follows it down in the background.
+      var rest = await prefetchAll();
+      if (rest) rest();
       return ranges;
     })(),
     ranges: function () { return ranges; },
+    prefetch: function () { return P.prefetch || null; },
     key: KEY,
     chunks: P.chunks || 0,
     rangesWhy: function () { return P.rangesWhy || null; },

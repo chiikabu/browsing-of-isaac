@@ -7805,3 +7805,61 @@ for the page itself and for anything still on a moving ref.
 Deployed and verified against what the hosts actually serve: 32/32 chunks byte
 for byte under the pinned commit, `index.html` current on both jsDelivr and
 Pages, and the live page booted from GitHub Pages.
+
+### 21.109 Round 89d: the first frame stops waiting for the whole payload
+
+**The range probe does not get to decide on this CDN.** Measured: every ranged
+read comes back **four bytes short** of what was asked for -- 64 -> 60, 1024 ->
+1020, 65536 -> 65532, every chunk, and the bytes are wrong. Half an hour earlier
+the identical probe against the same chunks returned its 64 bytes with a
+`Content-Range` total equal to the file, and passed. Round 84 recorded the same
+inconsistency and answered it with a stricter question; the answer this time is
+that there is no question worth asking, because a pass describes one edge node
+at one moment and the read that follows it goes wherever it goes. So `ranges`
+was `true` on the live site, `prefetchAll` was skipped, and the lie was found
+one archive read into the boot -- which is exactly the mid-room freeze the
+prefetch exists to prevent. The host is refused by name now. The generic probe
+that other hosts still get is harder: 1 KiB rather than 64 bytes, since the
+deficit is four and a short 64 still looks like a plausible read, and then a
+second, overlapping range that has to agree with the first where they cover the
+same bytes -- which is what a host serving from the wrong offset cannot do.
+
+**`prefetchAll` pulled all 32 chunks before the first frame.** 543.8 MB, counted
+off the server's own per-path byte totals, to serve the 175 MB the boot actually
+reads. The page has shipped the boot trail since round 59 and nothing was using
+it here. The chunks the trail names are **15 of 28**; part A -- read whole, holds
+the module -- is another 4. Those 19 are what the first frame waits for, and the
+remaining 13 follow it down at a narrower width, so a room the player wanders
+into later still does not pay a 19 MB GET at the moment they enter it.
+
+    awaited before the first frame   543.8 -> 328 MB
+    at 100 Mbit, first frame          28.5 s
+
+`piece()` also gained in-flight coalescing. Two callers can now want the same
+chunk at once -- the boot reading it and the background prefetch pulling it --
+and each was a whole 19 MB GET of its own.
+
+**An uncompressed window read through the Worker returned `undefined`.**
+`unscramble` hands back an ArrayBuffer, and `ArrayBuffer.slice` returns another
+ArrayBuffer, which has no `.buffer`. The cut at the end of the `#w=` path asked
+for one, so every window that skips the inflate -- which is every Vorbis and
+Theora window, the ones `wz` marks as stored -- came back as nothing. A packed
+window became a Uint8Array on its way through the inflate and worked, which is
+what hid it. This is on the path that is still off behind `P.workerWindows`, and
+it is one of the reasons it was.
+
+`?noranges=1` forces the whole-chunk path. Without it that half can only be
+exercised by deploying, and it is the half the CDN build runs.
+
+Verified on the built page: mods 37/37, saves 15/15, EDIT FILE 11/11, and
+`ISAAC_ARCHIVE_VERIFY=1` over the whole-chunk path -- the mount reads and
+checksums every archive entry through the engine's own decoder -- with no
+mismatch, no trap and no failed read across 509 console lines. The chunk bytes
+did not change: all 32 are identical to what is published, so only the page
+moved.
+
+Still open, and next: `piece()`'s cache has no eviction. Every chunk it fetches
+stays as a rebuilt 19 MB array, so a session that sees the whole payload holds
+532 MB of JS heap on top of the wasm arena. That was true before this round too
+-- the background prefetch does not make it worse, it just makes it easier to
+reach.

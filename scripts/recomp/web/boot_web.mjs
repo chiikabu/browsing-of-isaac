@@ -349,7 +349,11 @@ function start(key, url, len, why, want) {
       // a host that ignored the Range sent the whole chunk: the window's own
       // bytes still start where the fragment said
       if (buf.byteLength > want1 - want0 + 1) buf = buf.slice(want0, want1 + 1);
-      let win = unscramble(buf, winAt);
+      // unscramble hands back an ArrayBuffer, and ArrayBuffer.slice returns
+      // another ArrayBuffer -- which has no .buffer. An uncompressed window
+      // (Vorbis, Theora) skips the inflate below, so it reached the cut still
+      // an ArrayBuffer and every such read came back undefined. Take a view.
+      let win = new Uint8Array(unscramble(buf, winAt));
       if (winPacked) {
         const ds = new DecompressionStream('gzip');
         win = new Uint8Array(await new Response(new Blob([win]).stream().pipeThrough(ds)).arrayBuffer());

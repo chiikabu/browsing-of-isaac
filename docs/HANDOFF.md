@@ -191,6 +191,19 @@ REQUIRE emsdk on PATH:
   in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
   2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
   options, 16 mods, 19 online.
+- **Round 89d: the first frame stops waiting for the whole payload** (§21.109).
+  `prefetchAll` pulled all 32 chunks (543.8 MB) before the first frame to serve
+  the 175 MB the boot reads; the shipped boot trail names **15 of 28**, plus 4
+  of part A, so **328 MB** is awaited and the other 13 come down behind the
+  game. The range probe no longer decides on jsDelivr: every ranged read there
+  is **four bytes short** with wrong bytes, and half an hour earlier the same
+  probe passed — so the host is refused by name, and the generic probe is 1 KiB
+  plus an overlapping range that must agree. `piece()` coalesces in-flight
+  fetches. Fixed: an uncompressed window through the Worker returned
+  `undefined` (`ArrayBuffer.slice(...).buffer`), which is every Vorbis/Theora
+  window. **`?noranges=1`** forces the whole-chunk path — the one the CDN runs.
+  Next: `piece()`'s cache never evicts (532 MB of JS heap if a session sees the
+  whole payload).
 - **Round 89c: the deploy, and three ways to misread a CDN** (§21.108). Live at
   **543.5 MB in 32 files**, verified against what the hosts serve. Three traps,
   all of them in the checking rather than in the game: `drive_mods.mjs` set
