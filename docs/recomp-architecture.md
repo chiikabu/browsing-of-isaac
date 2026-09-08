@@ -7863,3 +7863,56 @@ stays as a rebuilt 19 MB array, so a session that sees the whole payload holds
 532 MB of JS heap on top of the wasm arena. That was true before this round too
 -- the background prefetch does not make it worse, it just makes it easier to
 reach.
+
+### 21.110 Round 89e-89f: the bar, and the memory that was never given back
+
+**89e, from a player's report: "it stays on a screen for a bit".** Two faults,
+both mine from 89d. The loading bar's total was still every chunk while the
+first frame waited for 19 of 32, so it climbed to 19/32, stopped at 59% and sat
+there through the module compile and the archive mount, reading `LOADING
+19 / 32` the whole time -- indistinguishable from a load that died. And the
+background prefetch started the moment `ready` resolved, which is before the
+module has compiled, so 19 MB GETs with nineteen window inflates behind them
+took main-thread time during the intro. The count is against what the first
+frame waits for now, the provider goes quiet once that is done, and the status
+says `STARTING` rather than `LOADING 19 / 19` for the ten seconds of compiling
+and mounting that follow. The white screen itself is the game's own McMillen
+intro; it just is not slow any more.
+
+    game appears     31.3 -> 24.5 s        dead-looking gap   12 -> ~4 s
+
+**89f: the cache had no ceiling, and the prefetch was a stockpile.** Measured
+with memory-infra: **631 MB of JS heap**, and a forced GC did not move a byte of
+it, on a renderer holding 1,494 MB private. Two causes, and both had to go.
+
+`piece()` kept every chunk it ever fetched as a rebuilt ~19.9 MB array and
+nothing was ever removed. It is an LRU with a 160 MB budget now. Eviction is
+safe at any moment for a reason worth writing down: a caller has already awaited
+its chunk and copies out of it, and the array lives exactly as long as that
+reference does, whether or not the Map still names it.
+
+The other half was 89d's own doing. Waiting on all 19 trail chunks before the
+first frame means 380 MB has to be **resident at once**, because nothing has
+read any of it yet -- a bounded cache cannot help with bytes that are all still
+owed. So the boot no longer waits for the set. It waits for a head -- part A,
+because the module is in it, and the first three archive chunks so the early
+reads hit -- and the remainder *streams behind the reader*, never more than
+`AHEAD` (4) chunks in front of it. A chunk the streamer has fetched that nothing
+has read is the only kind that must stay resident, so that number times 19.9 MB
+is what running ahead costs.
+
+Pacing needs a way out. The trail is the *last* boot's reads, and this boot may
+not want all of them, so a chunk could stay unread forever and stop the stream;
+`room()` resolves after a second regardless. And the pacing cannot apply to the
+head, because nothing reads anything until `ready` resolves -- pacing what the
+boot is blocked on would deadlock it.
+
+    JS heap            631.3 -> 256.5 MB
+    renderer private   1,494 -> 1,034 MB
+
+A nine-minute soak settles what "leak" meant: the heap sits at **159 MB, flat
+across 17,323 frames**, with all 32 chunks fetched. It reads the entire payload
+and gives all of it back. Verified alongside: mods 37/37, saves 15/15, EDIT FILE
+11/11, and `ISAAC_ARCHIVE_VERIFY=1` over the whole-chunk path with eviction
+live -- every archive entry checksummed through the engine's own decoder, no
+mismatch.

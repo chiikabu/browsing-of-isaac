@@ -191,6 +191,21 @@ REQUIRE emsdk on PATH:
   in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
   2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
   options, 16 mods, 19 online.
+- **Round 89e-89f: the bar, and the memory that was never given back** (§21.110).
+  The heap was **631 MB and a forced GC moved none of it**: `piece()` kept every
+  chunk it ever fetched as a rebuilt ~19.9 MB array. It is an **LRU with a
+  160 MB budget** now — evicting is safe because a caller has already awaited
+  its chunk and copies out of it. The other half was 89d's: waiting on all 19
+  trail chunks means 380 MB **resident at once**, which no cache can help with,
+  so the boot waits only for a head (part A + 3 archive chunks) and the rest
+  **streams behind the reader**, never more than `AHEAD`=4 chunks in front.
+  `room()` times out after 1 s because the trail is the *last* boot's reads and
+  this one may not want them all; the head cannot be paced or it deadlocks.
+  **JS heap 631 → 256 MB, renderer private 1,494 → 1,034 MB, and a 9-minute
+  soak sits flat at 159 MB across 17,323 frames with all 32 chunks fetched.**
+  89e also fixed the bar (counted to 32 while the frame waited for 19, so it
+  stalled at 59% looking dead) and made the status say `STARTING` during the
+  compile-and-mount; the white screen is the game's own McMillen intro.
 - **Round 89d: the first frame stops waiting for the whole payload** (§21.109).
   `prefetchAll` pulled all 32 chunks (543.8 MB) before the first frame to serve
   the 175 MB the boot reads; the shipped boot trail names **15 of 28**, plus 4

@@ -365,6 +365,31 @@ PROVIDER_JS = r"""
   var S = P.streams;                                  // one per byte run: {tag,size,gz}
   var WIN = 1048576;                                  // the engine's window (FS_WIN), and the read granularity
   var cache = new Map(), inline = P.blobs || null, ranges = true;
+  // Round 89f: this Map had no ceiling. Every chunk it held was a rebuilt
+  // ~19.9 MB array and nothing ever left, so a session that saw the payload sat
+  // on 631 MB of JS heap -- measured, and a forced GC did not move it. It is an
+  // LRU with a byte budget now. Evicting is safe whenever: a caller has already
+  // awaited its chunk and copies out of it, and the array lives as long as that
+  // reference does, whether or not the Map still names it.
+  var CACHE_MAX = 160 * 1048576, cacheBytes = 0;
+  function remember(key, u) {
+    var old = cache.get(key);
+    if (old) { cache.delete(key); cacheBytes -= old.length; }
+    cache.set(key, u); cacheBytes += u.length;
+    while (cacheBytes > CACHE_MAX && cache.size > 1) {
+      var oldest = cache.keys().next().value;
+      if (oldest === key) break;                    // never the one just put in
+      cacheBytes -= cache.get(oldest).length;
+      cache.delete(oldest);
+    }
+    return u;
+  }
+  // a hit moves the chunk to the young end, which is what makes it an LRU
+  function touch(key) {
+    var v = cache.get(key);
+    if (v !== undefined) { cache.delete(key); cache.set(key, v); }
+    return v;
+  }
   // round 77: the chunks are XORed with a seekable keystream so a file on a CDN
   // is not a recognisable archive. Reversible from any offset, which is what a
   // range read needs. The key is in this page, as it has to be.
@@ -466,15 +491,44 @@ PROVIDER_JS = r"""
   // reading it and the background prefetch pulling it -- and each was a whole
   // 19 MB GET of its own. One request, both waiters.
   var flight = new Map();
-  function piece(s, i) {
-    var key = s + ':' + i, hit = cache.get(key);
-    if (hit) return Promise.resolve(hit);
+  // `pre` marks a call made by the streamer rather than by a read. The
+  // difference matters only to the pacing below: a chunk nobody has read yet is
+  // what the streamer is not allowed to pile up.
+  function piece(s, i, pre) {
+    var key = s + ':' + i, hit = touch(key);
+    if (hit) { if (!pre) markRead(key); return Promise.resolve(hit); }
     var busy = flight.get(key);
-    if (busy) return busy;
+    if (busy) return pre ? busy : busy.then(function (u) { markRead(key); return u; });
     var pr = piece1(s, i);
     flight.set(key, pr);
-    return pr.then(function (u) { flight.delete(key); return u; },
-                   function (e) { flight.delete(key); throw e; });
+    pr = pr.then(function (u) { flight.delete(key); return u; },
+                 function (e) { flight.delete(key); throw e; });
+    if (pre) { pr.then(function () { markUnread(key); }, function () {}); return pr; }
+    return pr.then(function (u) { markRead(key); return u; });
+  }
+  // How far the streamer may run ahead of the reader. Chunks it has fetched
+  // that nothing has read yet are the only ones that MUST stay resident, so
+  // this number, times ~19.9 MB, is what running ahead costs.
+  var AHEAD = 4, HEAD_ARCHIVE = 3;
+  var unread = Object.create(null), unreadN = 0, waiting = [];
+  function markUnread(k) { if (!unread[k]) { unread[k] = 1; unreadN += 1; } }
+  function markRead(k) {
+    if (!unread[k]) return;
+    delete unread[k]; unreadN -= 1;
+    var w = waiting; waiting = [];
+    for (var j = 0; j < w.length; j++) w[j]();
+  }
+  // resolves when there is room to fetch another, or after a second regardless:
+  // the trail is the LAST boot's reads and this one may not want all of them,
+  // in which case nothing would ever mark them read and the stream would stop.
+  function room() {
+    if (unreadN < AHEAD) return Promise.resolve();
+    return new Promise(function (res) {
+      var done = false;
+      var go = function () { if (!done) { done = true; res(); } };
+      waiting.push(go);
+      setTimeout(go, 1000);
+    });
   }
   async function piece1(s, i) {
     var key = s + ':' + i;
@@ -487,7 +541,7 @@ PROVIDER_JS = r"""
       : (packed(s, i)
         ? new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer())
         : raw);
-    cache.set(key, u);
+    remember(key, u);
     return u;
   }
   // where a read lands when the chunk's windows are compressed one by one:
@@ -536,10 +590,10 @@ PROVIDER_JS = r"""
     var whole = chunkLen(p.s, p.i);
     if (r.status === 200 && whole >= 0 && u.length === whole) {
       u = unscramble(u, p.i * S[p.s].size);
-      cache.set(p.s + ':' + p.i, u);
+      remember(p.s + ':' + p.i, u);
       return u.subarray(p.within, p.within + p.take);
     }
-    cache.delete(p.s + ':' + p.i);
+    if (cache.has(p.s + ':' + p.i)) { cacheBytes -= cache.get(p.s + ':' + p.i).length; cache.delete(p.s + ':' + p.i); }
     return (await piece(p.s, p.i)).subarray(p.within, p.within + p.take);
   }
   async function gather(parts) {
@@ -672,13 +726,15 @@ PROVIDER_JS = r"""
   }
   // When ranges cannot be trusted every window is a whole GET of a 19 MB piece,
   // so the pieces are pulled up front rather than one per stall in a room.
-  function fetchList(jobs, width) {
+  function fetchList(jobs, width, paced) {
     var next = 0;
     async function worker() {
       for (;;) {
         var k = next++;
         if (k >= jobs.length) return;
-        try { await piece(jobs[k][0], jobs[k][1]); } catch (e) { /* a later read asks again */ }
+        // paced: never hold more than AHEAD chunks nothing has read yet
+        if (paced) await room();
+        try { await piece(jobs[k][0], jobs[k][1], paced); } catch (e) { /* a later read asks again */ }
       }
     }
     var crew = [], w;
@@ -732,16 +788,39 @@ PROVIDER_JS = r"""
     if (!t) { await fetchList(all, 6); return null; }
     var rest = [];
     for (i = 0; i < all.length; i++) if (!t.seen[all[i][0] + ':' + all[i][1]]) rest.push(all[i]);
-    // what the first frame waits for, and what follows it down
-    P.prefetch = { first: t.need.length, rest: rest.length, of: all.length };
-    awaiting = t.need.length;
-    await fetchList(t.need, 6);
+
+    // Round 89f: 89d had the first frame wait for all 19 trail chunks, which is
+    // 380 MB that has to be RESIDENT at once because nothing has read any of it
+    // yet -- half of the 631 MB heap this build was measured holding. The boot
+    // does not need them all at once; it needs them in order, a little ahead of
+    // where it is reading. So only the head is waited on -- part A, because the
+    // module is in it and nothing runs otherwise, and the first few archive
+    // chunks so the early reads hit -- and the remainder streams behind the
+    // reader, never more than AHEAD chunks in front of it.
+    var head = [], tail = [];
+    for (i = 0; i < t.need.length; i++) {
+      var st = S[t.need[i][0]];
+      if (st.gz || head.length < HEAD_ARCHIVE + partACount()) head.push(t.need[i]);
+      else tail.push(t.need[i]);
+    }
+    P.prefetch = { head: head.length, stream: tail.length, rest: rest.length, of: all.length };
+    awaiting = head.length;
+    await fetchList(head, 6);
     // the wait is over: say so once, then stop talking. What follows is not
     // something the player is waiting on and must not read as loading.
     if (P.onChunk) { try { P.onChunk(awaiting, awaiting); } catch (e) { /* decoration */ } }
     quiet = true;
-    // narrower than the six above on purpose: this runs while the game does
-    return rest.length ? function () { return fetchList(rest, 2); } : null;
+    return function (which) {
+      // the trail's remainder feeds the boot and starts at once; the chunks no
+      // boot reads are for a run that wanders, and wait for an idle moment
+      if (which === 'stream') return tail.length ? fetchList(tail, 3, true) : Promise.resolve();
+      return rest.length ? fetchList(rest, 2, true) : Promise.resolve();
+    };
+  }
+  function partACount() {
+    var n = 0;
+    for (var j = 0; j < S.length; j++) if (S[j].gz && S[j].size > WIN) n += count(j);
+    return n;
   }
   window.isaacPortable = {
     manifest: P.manifest,
@@ -757,17 +836,21 @@ PROVIDER_JS = r"""
       // Pull the pieces the boot reads before the engine starts. jsDelivr's
       // ranges lie, so a window is a 19 MB GET; doing that mid-room is the
       // freeze. What the boot does NOT read follows it down in the background.
-      var rest = await prefetchAll();
-      // Round 89d: and not before the game is up. Between ready and the first
-      // frame the module still has to compile and the engine still has to mount
-      // its archives, and a 19 MB GET with nineteen window inflates behind it
-      // takes main-thread time in the middle of exactly that -- which is a
-      // white screen for as long as it lasts. requestIdleCallback fires once
-      // the frame loop is yielding, which is the game running; the timeout is
-      // the backstop for a page that never goes idle.
-      if (rest) {
-        if (typeof requestIdleCallback === 'function') requestIdleCallback(function () { rest(); }, { timeout: 60000 });
-        else setTimeout(rest, 20000);
+      var more = await prefetchAll();
+      if (more) {
+        // the rest of the boot's own chunks, behind the reader and paced
+        more('stream');
+        // Round 89d: and the ones no boot reads not before the game is up.
+        // Between ready and the first frame the module still has to compile and
+        // the engine still has to mount its archives, and a 19 MB GET with
+        // nineteen window inflates behind it takes main-thread time in the
+        // middle of exactly that -- a white screen for as long as it lasts.
+        // requestIdleCallback fires once the frame loop is yielding, which is
+        // the game running; the timeout is the backstop for a page that never
+        // goes idle.
+        var later = function () { more('rest'); };
+        if (typeof requestIdleCallback === 'function') requestIdleCallback(later, { timeout: 60000 });
+        else setTimeout(later, 20000);
       }
       return ranges;
     })(),
