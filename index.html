@@ -4,10 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Isaac, recompiled</title>
-<link rel="icon" href="favicon.ico" type="image/x-icon">
-<link rel="shortcut icon" href="favicon.ico">
-<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
-<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>
   :root { --bg: #14110f; --panel: #211b17; --edge: #3a2f27; --ink: #e9dfcf; --dim: #a1937f; --accent: #e0a842; --bar: #7a5a2f; --err: #d24d3f; --ok: #79b36a;
           /* the menu's bone white, and the dimmer one its labels are drawn in */
@@ -130,11 +126,18 @@
     return bytes;
   }
   var loaded = Object.create(null), loadedN = 0;
+  // Round 89d: the bar counts what the first frame is waiting for. That used to
+  // be every chunk; now it is the ones the boot trail names, and the ones that
+  // come down afterwards must not push the count past its own total or keep
+  // writing "loading 21 / 32" over the status line while the game is running.
+  var awaiting = 0, quiet = false;
   function note(s, i) {
     var k = s + ':' + i;
     if (loaded[k]) return;
     loaded[k] = 1; loadedN += 1;
-    if (P.onChunk) { try { P.onChunk(loadedN, P.chunks || 0); } catch (e) { /* the readout is decoration */ } }
+    if (quiet || !P.onChunk) return;
+    var tot = awaiting || P.chunks || 0;
+    try { P.onChunk(Math.min(loadedN, tot), tot); } catch (e) { /* the readout is decoration */ }
   }
   function decode(b) {
     return (typeof Uint8Array.fromBase64 === 'function')
@@ -475,7 +478,12 @@
     for (i = 0; i < all.length; i++) if (!t.seen[all[i][0] + ':' + all[i][1]]) rest.push(all[i]);
     // what the first frame waits for, and what follows it down
     P.prefetch = { first: t.need.length, rest: rest.length, of: all.length };
+    awaiting = t.need.length;
     await fetchList(t.need, 6);
+    // the wait is over: say so once, then stop talking. What follows is not
+    // something the player is waiting on and must not read as loading.
+    if (P.onChunk) { try { P.onChunk(awaiting, awaiting); } catch (e) { /* decoration */ } }
+    quiet = true;
     // narrower than the six above on purpose: this runs while the game does
     return rest.length ? function () { return fetchList(rest, 2); } : null;
   }
@@ -494,7 +502,17 @@
       // ranges lie, so a window is a 19 MB GET; doing that mid-room is the
       // freeze. What the boot does NOT read follows it down in the background.
       var rest = await prefetchAll();
-      if (rest) rest();
+      // Round 89d: and not before the game is up. Between ready and the first
+      // frame the module still has to compile and the engine still has to mount
+      // its archives, and a 19 MB GET with nineteen window inflates behind it
+      // takes main-thread time in the middle of exactly that -- which is a
+      // white screen for as long as it lasts. requestIdleCallback fires once
+      // the frame loop is yielding, which is the game running; the timeout is
+      // the backstop for a page that never goes idle.
+      if (rest) {
+        if (typeof requestIdleCallback === 'function') requestIdleCallback(function () { rest(); }, { timeout: 60000 });
+        else setTimeout(rest, 20000);
+      }
       return ranges;
     })(),
     ranges: function () { return ranges; },
