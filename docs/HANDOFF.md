@@ -191,6 +191,19 @@ REQUIRE emsdk on PATH:
   in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
   2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
   options, 16 mods, 19 online.
+- **Round 89c: the deploy, and three ways to misread a CDN** (§21.108). Live at
+  **543.5 MB in 32 files**, verified against what the hosts serve. Three traps,
+  all of them in the checking rather than in the game: `drive_mods.mjs` set
+  `window.isaacModCatalogue` in an init script and a built page's own assignment
+  ran after it and won (29/37 that looked like a regression -- it passes its
+  catalogue as `?catalogue=` now, which is read first); jsDelivr serves chunks
+  `content-encoding: br`, so `content-length` and a `Content-Range` total are the
+  ENCODED size and a chunk of deflated windows grows by 8-57 bytes when
+  re-compressed -- `check_deployed.mjs` reads 64 KB off an `identity` stream
+  instead; and a file under `@main` stayed stale through three purges while
+  `@<sha>` was already right, so **the page is pinned to the payload commit**
+  (immutable, never purged; the mod catalogue stays on `@main` on purpose).
+  `purge_cdn.mjs` purges every path the page names.
 - **Round 89b: the same idea in thirty files** (§21.107). One chunk per window
   meant 525 files, which is more than this project can host. Compressing each
   window INSIDE the existing chunks keeps the layout, the file count and the

@@ -14,7 +14,7 @@
 // then run it again. A purge that did not take looks exactly like one that did
 // until the bytes are compared.
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, openSync, readSync, closeSync } from 'node:fs';
 
 const sha = (b) => createHash('sha256').update(b).digest('hex').slice(0, 16);
 const local = (p) => { const b = readFileSync(p); return { sha: sha(b), len: b.length }; };
@@ -43,6 +43,53 @@ for (const [name, path, url] of targets) {
     + `${got.sha || got.err} ${String(got.len ?? '').padStart(9)}  ${same ? 'same' : '*** STALE ***'}`
     + `${got.age ? `  age=${got.age}s` : ''}`);
 }
+
+// Every other chunk, by its first 64 KB. Hashing 543 MB to find out whether a
+// push landed is not worth the bandwidth, and lengths cannot be used at all:
+// jsDelivr serves these br-encoded, so content-length AND the total in a
+// Content-Range are the ENCODED size, a few bytes off the real one in either
+// direction. Ask for identity and read the front of the stream instead -- a
+// rebuild recompresses every window, so the first window is already different.
+const page = readFileSync(`${BUILT}/index.html`, 'utf8');
+const at = page.indexOf('__isaacPortableData');
+const open = page.indexOf('{', at);
+let depth = 0, end = open;
+for (; end < page.length; end++) { if (page[end] === '{') depth++; else if (page[end] === '}' && !--depth) { end++; break; } }
+const P = JSON.parse(page.slice(open, end));
+const names = [];
+for (const s of P.streams) for (let i = 0; i < s.n; i++) names.push(`${s.tag}${i}`);
+const rest = names.filter((n) => !/^a\d+$/.test(n));
+const HEAD_BYTES = 65536;
+const front = async (stream) => {
+  const rd = stream.getReader();
+  const out = []; let n = 0;
+  while (n < HEAD_BYTES) {
+    const { done, value } = await rd.read();
+    if (done) break;
+    out.push(Buffer.from(value)); n += value.length;
+  }
+  await rd.cancel().catch(() => {});
+  return Buffer.concat(out).subarray(0, HEAD_BYTES);
+};
+let wrong = 0;
+for (const n of rest) {
+  const fd = openSync(`${BUILT}/c/${n}.bin`, 'r');
+  const buf = Buffer.alloc(HEAD_BYTES);
+  readSync(fd, buf, 0, HEAD_BYTES, 0);
+  closeSync(fd);
+  const want = sha(buf);
+  let got;
+  try {
+    const r = await fetch(`${CDN}/c/${n}.bin`, { cache: 'no-store', headers: { 'accept-encoding': 'identity' } });
+    got = r.ok ? sha(await front(r.body)) : `HTTP ${r.status}`;
+  } catch (e) { got = e.message; }
+  await new Promise((r) => setTimeout(r, 250));   // 403s come back if this runs flat out
+  if (got !== want) {
+    wrong += 1; stale += 1;
+    console.log(`c/${n}.bin`.padEnd(12) + ` local ${want}  |  served ${got}  *** STALE ***`);
+  }
+}
+console.log(`${rest.length} more chunk(s) checked by their first ${HEAD_BYTES >> 10} KB, ${wrong ? wrong + ' wrong' : 'all current'}`);
 
 try {
   const r = await fetch(PAGES, { cache: 'no-store' });

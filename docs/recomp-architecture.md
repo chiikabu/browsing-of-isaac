@@ -7759,3 +7759,49 @@ that a page carrying a boot_web.mjs older than the fragment it was being handed.
 `portable.py` inlines the modules from the dist, so **ship.py build comes first,
 every time** -- and when a build behaves impossibly, compare what is on disk
 before reasoning about the code.
+
+### 21.108 Round 89c: the deploy, and three ways to misread a CDN
+
+Shipping round 89b took four wrong answers about what the hosts were serving,
+none of them about the game.
+
+**The driver's catalogue was being thrown away.** `drive_mods.mjs` serves its
+own mod catalogue and pointed the page at it with `addInitScript`, which sets
+`window.isaacModCatalogue` before the page's own scripts run. A page built with
+`portable.py --catalogue` assigns that same global itself, and its assignment
+runs *after* the init script, so on a real built page the driver's catalogue was
+overwritten and eight checks failed against an empty browser -- 29/37. It read
+as a regression in the payload; it was the harness. The page reads
+`params.get('catalogue')` before the global, so the driver passes it there
+instead and gets 37/37 on the built page rather than on a page that happened to
+have no catalogue of its own. Where a harness and the thing it tests set the
+same variable, the harness must use the input that wins, not the one that loses.
+
+**Lengths cannot be compared against jsDelivr.** `check_deployed.mjs` was
+extended to check all 32 chunks by `content-length` from a HEAD, and called 28
+of 28 stale, each served length a few bytes *larger* than the local file. The
+CDN serves these `content-encoding: br`, so both the `content-length` and the
+total in a `Content-Range` are the size of the **encoded** body -- and a chunk
+of already-deflated windows grows by 8 to 57 bytes when it is compressed again.
+Asking for `identity` removes the encoding and the `content-length` with it.
+What works is an identity GET whose stream is read for 64 KB and then cancelled:
+real bytes, 2 MB for the whole payload, and a rebuild changes the first window
+of every chunk, so the front of the file is signal.
+
+**`@main` can serve a stale file that purging will not fix.** After the payload
+push, two chunks under `@main` were the previous build's. One purge fixed the
+first. The second survived three purges and came back with no `age` header at
+all, while the same file under `@<sha>` and on raw.githubusercontent were both
+already correct. The alias is a moving target that the CDN resolves and caches
+on its own schedule, and the page has no reason to use it: the chunks it wants
+are exactly the ones from the commit it was built against. `portable.py`'s base
+is now re-pointed at the payload commit after that commit exists -- an immutable
+path, cached forever, and no purge in the deploy at all. The mod catalogue stays
+on `@main` deliberately: mods are added to it without rebuilding the page.
+
+`purge_cdn.mjs` reads the chunk names out of the built page and purges the lot,
+for the page itself and for anything still on a moving ref.
+
+Deployed and verified against what the hosts actually serve: 32/32 chunks byte
+for byte under the pinned commit, `index.html` current on both jsDelivr and
+Pages, and the live page booted from GitHub Pages.
