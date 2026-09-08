@@ -371,17 +371,26 @@ PROVIDER_JS = r"""
   // LRU with a byte budget now. Evicting is safe whenever: a caller has already
   // awaited its chunk and copies out of it, and the array lives as long as that
   // reference does, whether or not the Map still names it.
-  var CACHE_MAX = 256 * 1048576, cacheBytes = 0;
+  // Two budgets, because the boot and the game want different things. The boot
+  // reads a known set -- the trail's chunks -- and a ceiling below that set just
+  // evicts what it has not finished with and makes it fetch the same 19 MB
+  // twice: measured at 3.7 s added to frame 300. So the boot gets a budget
+  // sized to its own working set, and once a frame exists that drops to STEADY
+  // and the LRU drains. Nothing the boot read is worth keeping by then.
+  var CACHE_STEADY = 256 * 1048576;
+  var CACHE_MAX = CACHE_STEADY, cacheBytes = 0;
+  function trim() {
+    while (cacheBytes > CACHE_MAX && cache.size > 1) {
+      var oldest = cache.keys().next().value;
+      cacheBytes -= cache.get(oldest).length;
+      cache.delete(oldest);
+    }
+  }
   function remember(key, u) {
     var old = cache.get(key);
     if (old) { cache.delete(key); cacheBytes -= old.length; }
     cache.set(key, u); cacheBytes += u.length;
-    while (cacheBytes > CACHE_MAX && cache.size > 1) {
-      var oldest = cache.keys().next().value;
-      if (oldest === key) break;                    // never the one just put in
-      cacheBytes -= cache.get(oldest).length;
-      cache.delete(oldest);
-    }
+    trim();
     return u;
   }
   // a hit moves the chunk to the young end, which is what makes it an LRU
@@ -817,7 +826,11 @@ PROVIDER_JS = r"""
     // If the boot ever falls behind the fetch, the cost is one more 19 MB GET,
     // not a stall.
     var head = t.need;
-    P.prefetch = { head: head.length, rest: rest.length, of: all.length };
+    // the boot's own ceiling: everything it is about to read, plus one spare
+    var want = 0;
+    for (i = 0; i < head.length; i++) want += S[head[i][0]].size;
+    if (want + S[head[0][0]].size > CACHE_MAX) CACHE_MAX = want + S[head[0][0]].size;
+    P.prefetch = { head: head.length, rest: rest.length, of: all.length, cacheMB: Math.round(CACHE_MAX / 1048576) };
     awaiting = head.length;
     await fetchList(head, 6);
     // the wait is over: say so once, then stop talking. What follows is not
@@ -862,6 +875,8 @@ PROVIDER_JS = r"""
         var t0 = Date.now();
         var whenRunning = function () {
           if ((window.isaacFrame || 0) > 0 || Date.now() - t0 > 120000) {
+            // the boot is done with its working set: give the memory back
+            CACHE_MAX = CACHE_STEADY; trim();
             if (typeof requestIdleCallback === 'function') requestIdleCallback(later, { timeout: 30000 });
             else setTimeout(later, 5000);
             return;

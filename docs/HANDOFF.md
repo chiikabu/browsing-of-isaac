@@ -201,8 +201,19 @@ REQUIRE emsdk on PATH:
   **streams behind the reader**, never more than `AHEAD`=4 chunks in front.
   `room()` times out after 1 s because the trail is the *last* boot's reads and
   this one may not want them all; the head cannot be paced or it deadlocks.
-  **JS heap 631 → 256 MB, renderer private 1,494 → 1,034 MB, and a 9-minute
-  soak sits flat at 159 MB across 17,323 frames with all 32 chunks fetched.**
+  **JS heap 631 → 257 MB flat across 12,449 frames, renderer private 1,517 →
+  1,169 MB, and nothing slower — first frame 3,726 → 3,070 ms, frame 600
+  16,886 → 16,042, steady-state frame rate unchanged.** Two budgets, because
+  one is not enough: the boot gets a ceiling sized to the chunks its trail
+  names (a flat 256 MB evicted what it had not finished with and cost +3.7 s to
+  frame 300), and that drops to 256 MB once a frame exists. **Streaming the
+  payload past the reader was tried and reverted** — it bounded memory to
+  141 MB and left the game at frame 2 for three minutes, because `rebuild()`
+  inflates nineteen windows per chunk on the main thread and the engine owns
+  that thread once `main()` runs. The fetching must finish before the engine
+  starts. The leftover chunks wait for a **frame**, not for idle: the boot
+  waiting on its own reads looks idle, so `requestIdleCallback` fired mid-boot
+  and evicted what the boot still needed.
   89e also fixed the bar (counted to 32 while the frame waited for 19, so it
   stalled at 59% looking dead) and made the status say `STARTING` during the
   compile-and-mount; the white screen is the game's own McMillen intro.

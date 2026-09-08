@@ -7910,9 +7910,41 @@ boot is blocked on would deadlock it.
     JS heap            631.3 -> 256.5 MB
     renderer private   1,494 -> 1,034 MB
 
-A nine-minute soak settles what "leak" meant: the heap sits at **159 MB, flat
-across 17,323 frames**, with all 32 chunks fetched. It reads the entire payload
-and gives all of it back. Verified alongside: mods 37/37, saves 15/15, EDIT FILE
-11/11, and `ISAAC_ARCHIVE_VERIFY=1` over the whole-chunk path with eviction
-live -- every archive entry checksummed through the engine's own decoder, no
-mismatch.
+**The streaming attempt, and why it was wrong.** The first shape of this fix had
+the boot wait only for a head and streamed the rest past the reader, paced so no
+more than four fetched-but-unread chunks were ever held. It bounded the memory
+beautifully -- 141 MB live -- and cost the game: the first frame came in 11 s and
+then sat at frame 2 for another three minutes. `rebuild()` inflates nineteen
+windows per chunk on the main thread, and once `main()` is running the engine
+owns that thread, so a chunk that arrives during the boot rebuilds at a crawl.
+Widening the stream to eight ahead and six at a time did not move it. **The
+fetching has to finish before the engine starts.** The pacing machinery is still
+there and is used for the leftover chunks, which arrive when nothing else wants
+the thread.
+
+So the cache alone bounds the memory -- and one ceiling is not enough for it.
+At a flat 256 MB the prefetch evicted trail chunks the boot had not finished
+with and the boot fetched the same 19 MB twice: **+3.7 s to frame 300**. There
+are two budgets now. The boot gets one sized to its own working set, computed
+from the chunks the trail names, so nothing it is about to read can be evicted.
+Once a frame exists the budget drops to 256 MB and the LRU drains: nothing the
+boot read is worth keeping by then.
+
+The leftover chunks wait for that same frame, not for an idle moment. The boot
+spends most of its time waiting on its own reads, which looks idle, so
+`requestIdleCallback` fired *during* the boot and pulled thirteen more chunks
+through the cache -- evicting what the boot still needed. A frame is the only
+signal here that the boot is genuinely done.
+
+Measured against the build before any of it, same machine, same local server:
+
+    JS heap (soak)     631 -> 257 MB, flat across 12,449 frames
+    renderer private  1,517 -> 1,169 MB      all children  2,159 -> 1,806 MB
+    first frame        3,726 -> 3,070 ms
+    frame 300         11,854 -> 10,968 ms    frame 600  16,886 -> 16,042 ms
+
+Nothing got slower: the steady-state frame rate is unchanged (frames 300 to 600
+took 5,032 ms before and 5,021 ms after) and the boot is a little quicker.
+Verified alongside: mods 37/37, saves 15/15, EDIT FILE 11/11, and
+`ISAAC_ARCHIVE_VERIFY=1` on **both** read paths with eviction live -- every
+archive entry checksummed through the engine's own decoder, no mismatch.
