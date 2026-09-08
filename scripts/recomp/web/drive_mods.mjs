@@ -214,7 +214,10 @@ try {
   }
   check(seeded === 'ok', 'a save and the options are in the save store before the run', String(seeded));
 
-  await page.goto(URL);
+  // A built page assigns window.isaacModCatalogue itself (portable.py
+  // --catalogue) and that assignment runs after addInitScript, so setting the
+  // global is not enough on such a page. ?catalogue= is read first and wins.
+  await page.goto(URL + (URL.includes('?') ? '&' : '?') + 'catalogue=' + encodeURIComponent(CAT_BASE));
   await boot();
   check(!!(await logMatch(/=== seed mods ===/)), 'the pipeline seeded mods');
   // Round 82: nothing is seeded on a save with no mods, so the run is not a
