@@ -23,9 +23,16 @@ const CDN = process.argv[2] || 'https://cdn.jsdelivr.net/gh/chiikabu/boi-portabl
 const PAGES = process.argv[3] || 'https://chiikabu.github.io/the-browsing-of-isaac/';
 const BUILT = process.argv[4] || '.scratch/portable-chunks';
 
+// Round 89i: the page is NOT checked at the base the chunks come from. Since
+// 89c that base is a commit, and a commit-pinned path is frozen on purpose --
+// the page as it stood then is exactly what @<sha>/index.html should serve, so
+// checking the current build against it reports a staleness that is not one.
+// The page is served from a moving ref, and that is where it is asked for.
+const PAGE_CDN = CDN.replace(/@[0-9a-f]{7,40}(?=\/|$)/, '@main');
+
 // index.html plus part A: the module is in the a* chunks, so a stale one of
 // those is a stale engine no matter how current the page is
-const targets = [['index.html', `${BUILT}/index.html`, `${CDN}/index.html`]];
+const targets = [['index.html', `${BUILT}/index.html`, `${PAGE_CDN}/index.html`]];
 for (const n of ['a0', 'a1', 'a2', 'a3']) targets.push([`c/${n}.bin`, `${BUILT}/c/${n}.bin`, `${CDN}/c/${n}.bin`]);
 
 let stale = 0;
