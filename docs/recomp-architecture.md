@@ -7721,3 +7721,41 @@ offset. `portable.py` inlines the modules from the dist, so a change to
 boot_web.mjs needs `ship.py build` before the chunks are rebuilt. That is the
 third time this project has lost time to reading something other than what it
 had just written.
+
+### 21.107 Round 89b: the same idea in thirty files
+
+21.106 got the compression by making the chunk exactly one window -- and 525
+files, which is more than this project can host. The requirement is about thirty.
+Both can be had: keep the chunks the size they are, and compress each 1 MiB
+window INSIDE the chunk, on its own.
+
+Then nothing about the layout moves. A chunk still holds nineteen windows, still
+rebuilds to exactly the bytes it always held, and a window is still one
+contiguous range -- just a shorter one. What the page needs is the stored length
+of every window in order (`wl`); every offset is a prefix sum of that. `wz` says
+which windows really are compressed, because a window of Theora or Vorbis hands
+back 100.0% of what it is given and must not pay an inflate on every read.
+
+    payload   563.6 -> 543.5 MB in 32 files     (-20.1)
+    with round 88's archives:  575.6 -> 543.5 MB
+
+Two read paths exist and only one of them works. `piece()` fetches a chunk whole
+and rebuilds it from its windows; that is what runs where ranges cannot be
+trusted, which is this project's host, and it is verified. The other -- handing
+the reader Worker the window's own byte range, so a read costs a window rather
+than a chunk -- returns wrong bytes somewhere and is **off** (`P.workerWindows`
+is never set). The layout underneath it is not the problem: a harness that
+reconstructs windows straight from the chunk files and compares them with the
+dist checks out at every sample. The bug is in the fragment path, and it is
+where the next hour should go.
+
+Verified as it stands: `?ISAAC_ARCHIVE_VERIFY=1` checksums every entry through
+the engine's own decoder with no mismatch, 9,660 frames at ~16 ms, mods 37/37,
+saves 15/15, EDIT FILE 11/11.
+
+Two hours went to two stale artefacts, both the same mistake in different
+clothes: chunks built from one dist and a page built from another, and before
+that a page carrying a boot_web.mjs older than the fragment it was being handed.
+`portable.py` inlines the modules from the dist, so **ship.py build comes first,
+every time** -- and when a build behaves impossibly, compare what is on disk
+before reasoning about the code.

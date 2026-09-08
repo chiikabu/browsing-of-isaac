@@ -668,13 +668,15 @@ PROVIDER_JS = r"""
       // Round 89: the window's own stored bytes are a range like any other --
       // shorter, and the Worker unwraps them. `!z` says whether this particular
       // window is compressed at all, and `*at-take` is the cut inside it.
-      var w = inWindow(p);
-      if (w) {
-        return name(p.s, p.i) + '#w=' + w.from + '-' + w.to + '@' + w.abs
-          + '!' + (S[p.s].wz.charAt(w.k) === '1' ? 1 : 0)
-          + '*' + w.at + '-' + p.take;
+      if (S[p.s].wl) {
+        var w = P.workerWindows ? inWindow(p) : null;
+        if (w) {
+          return name(p.s, p.i) + '#w=' + w.from + '-' + w.to + '@' + w.abs
+            + '!' + (S[p.s].wz.charAt(w.k) === '1' ? 1 : 0)
+            + '*' + w.at + '-' + p.take;
+        }
+        return null;              // the bytes path rebuilds the chunk instead
       }
-      if (S[p.s].wl) return null;   // straddles two windows: the bytes path serves it
       // the range rides in the fragment, which no server sees; `@pos` after it is
       // where those bytes start in the stream, which is what unscrambles them
       // `!len` is the chunk's own length: the Worker has nothing else to check a

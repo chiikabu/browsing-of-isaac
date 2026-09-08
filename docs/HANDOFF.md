@@ -191,6 +191,15 @@ REQUIRE emsdk on PATH:
   in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
   2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
   options, 16 mods, 19 online.
+- **Round 89b: the same idea in thirty files** (§21.107). One chunk per window
+  meant 525 files, which is more than this project can host. Compressing each
+  window INSIDE the existing chunks keeps the layout, the file count and the
+  saving: **543.5 MB in 32 files**, and with round 88 that is 575.6 -> 543.5.
+  `wl` is the stored length of every window and `wz` says which are really
+  compressed. The chunk-rebuild path is verified and is what runs where ranges
+  cannot be trusted; the Worker window-range path returns wrong bytes and is
+  **off** (`P.workerWindows`). The layout under it is proven correct by a
+  harness that rebuilds windows straight from the chunk files.
 - **Round 89: when the chunk is the window, the chunk can be compressed** (§21.106).
   `--part-mib 1 --window-gz`: the ranged half becomes one gzipped chunk per
   window, which the reader takes whole, so no byte range is ever asked for and
