@@ -185,7 +185,12 @@ if (portable && portable.chunks) {
     stages.chunks.received = got;
     stages.chunks.total = total || stages.chunks.total;
     stages.chunks.done = got >= stages.chunks.total;
-    setStatus(`loading ${got} / ${stages.chunks.total}`);
+    // Round 89e: once the fetching is done the engine still has a module to
+    // compile and archives to mount, and that is ten seconds or more. Leaving
+    // the count up said LOADING 19 / 19 for all of it, which reads as a load
+    // that finished and then hung.
+    setStatus(stages.chunks.done ? 'starting' : `loading ${got} / ${stages.chunks.total}`,
+              stages.chunks.done ? `${got} chunk(s) fetched; compiling and mounting` : null);
     render();
   };
 }
