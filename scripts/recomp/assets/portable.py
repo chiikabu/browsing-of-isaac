@@ -371,7 +371,7 @@ PROVIDER_JS = r"""
   // LRU with a byte budget now. Evicting is safe whenever: a caller has already
   // awaited its chunk and copies out of it, and the array lives as long as that
   // reference does, whether or not the Map still names it.
-  var CACHE_MAX = 128 * 1048576, cacheBytes = 0;
+  var CACHE_MAX = 256 * 1048576, cacheBytes = 0;
   function remember(key, u) {
     var old = cache.get(key);
     if (old) { cache.delete(key); cacheBytes -= old.length; }
@@ -803,30 +803,30 @@ PROVIDER_JS = r"""
     // module is in it and nothing runs otherwise, and the first few archive
     // chunks so the early reads hit -- and the remainder streams behind the
     // reader, never more than AHEAD chunks in front of it.
-    var head = [], tail = [];
-    for (i = 0; i < t.need.length; i++) {
-      var st = S[t.need[i][0]];
-      if (st.gz || head.length < HEAD_ARCHIVE + partACount()) head.push(t.need[i]);
-      else tail.push(t.need[i]);
-    }
-    P.prefetch = { head: head.length, stream: tail.length, rest: rest.length, of: all.length };
+    // Round 89f, second attempt. Streaming the boot's chunks past the reader
+    // bounded the memory and cost the game: the first frame came in 11 s and
+    // then sat at frame 2 for another three minutes. rebuild() inflates
+    // nineteen windows per chunk on the main thread, and once main() is running
+    // the engine owns that thread -- so a fetch that arrives during the boot
+    // rebuilds at a crawl, and widening the stream did not move it. The
+    // fetching has to finish BEFORE the engine starts, which is what 89d had.
+    //
+    // What bounds the memory now is the cache alone. The prefetch inserts in
+    // trail order and the boot reads in trail order, so the least recently used
+    // chunk is one the boot has already read -- eviction lands on dead weight.
+    // If the boot ever falls behind the fetch, the cost is one more 19 MB GET,
+    // not a stall.
+    var head = t.need;
+    P.prefetch = { head: head.length, rest: rest.length, of: all.length };
     awaiting = head.length;
     await fetchList(head, 6);
     // the wait is over: say so once, then stop talking. What follows is not
     // something the player is waiting on and must not read as loading.
     if (P.onChunk) { try { P.onChunk(awaiting, awaiting); } catch (e) { /* decoration */ } }
     quiet = true;
-    return function (which) {
-      // the trail's remainder feeds the boot and starts at once; the chunks no
-      // boot reads are for a run that wanders, and wait for an idle moment
-      if (which === 'stream') return tail.length ? fetchList(tail, STREAM_WIDTH, true) : Promise.resolve();
-      return rest.length ? fetchList(rest, 2, true) : Promise.resolve();
-    };
-  }
-  function partACount() {
-    var n = 0;
-    for (var j = 0; j < S.length; j++) if (S[j].gz && S[j].size > WIN) n += count(j);
-    return n;
+    // the chunks no boot reads are for a run that wanders: paced, so they
+    // cannot pile up unread, and idle, so they do not fetch during the intro
+    return rest.length ? function () { return fetchList(rest, 2, true); } : null;
   }
   window.isaacPortable = {
     manifest: P.manifest,
@@ -844,9 +844,7 @@ PROVIDER_JS = r"""
       // freeze. What the boot does NOT read follows it down in the background.
       var more = await prefetchAll();
       if (more) {
-        // the rest of the boot's own chunks, behind the reader and paced
-        more('stream');
-        // Round 89d: and the ones no boot reads not before the game is up.
+        // Round 89d: the ones no boot reads, not before the game is up.
         // Between ready and the first frame the module still has to compile and
         // the engine still has to mount its archives, and a 19 MB GET with
         // nineteen window inflates behind it takes main-thread time in the
@@ -854,7 +852,7 @@ PROVIDER_JS = r"""
         // requestIdleCallback fires once the frame loop is yielding, which is
         // the game running; the timeout is the backstop for a page that never
         // goes idle.
-        var later = function () { more('rest'); };
+        var later = function () { more(); };
         if (typeof requestIdleCallback === 'function') requestIdleCallback(later, { timeout: 60000 });
         else setTimeout(later, 20000);
       }
