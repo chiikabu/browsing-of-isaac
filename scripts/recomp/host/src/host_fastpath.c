@@ -1375,3 +1375,52 @@ common_exit:
 #undef TF_U32
 #undef TF_LOOKUP_SIZE
 #undef TF_LOOKUP_BITS
+
+/* ---- libvorbis mdct_bitreverse (0x00abb750): a bounds guard -------------
+ *
+ * Every cutscene whose video carries a Vorbis audio track trapped here with
+ * "memory access out of bounds", and the one video without audio played fine
+ * -- so no ending video has ever played in this port. The function indexes
+ *
+ *     x[(n>>1) + bitrev[k]]
+ *
+ * with no clamp of its own; the loop's only bound is a pointer compare. If the
+ * mdct_lookup it is handed is not the one mdct_init (0x00abab70) filled -- or
+ * was filled with a wrong log2n, which is what bitrev's contents are derived
+ * from -- the index leaves the arena and the whole run dies on it.
+ *
+ * The trap is worse than the symptom it guards: a run ends. This checks the
+ * lookup before the lifted body runs, reports the values once so the real bug
+ * can be found from a player's log, and skips the block when they are wrong.
+ * A skipped block is a moment of wrong audio; the alternative is the run.
+ */
+int isaac_vorbis_bitrev_ok(uint32_t init_va, uint32_t x_va) {
+    uint32_t n, half, trig, bitrev, k, entries;
+    static int reported;
+    if (!isaac_is_guest_va(init_va) || !isaac_is_guest_va(init_va + 0x13u)) return 0;
+    n = isaac_r32(init_va);
+    trig = isaac_r32(init_va + 0x08u);
+    bitrev = isaac_r32(init_va + 0x0cu);
+    /* n is a Vorbis blocksize: a power of two, 64..8192 */
+    if (n < 64u || n > 8192u || (n & (n - 1u)) != 0u) goto bad;
+    half = n >> 1;
+    entries = n >> 2;                       /* bitrev holds n/4 ints */
+    if (!isaac_is_guest_va(x_va) || !isaac_is_guest_va(x_va + n * 4u - 1u)) goto bad;
+    if (!isaac_is_guest_va(trig) || !isaac_is_guest_va(trig + n * 4u - 1u)) goto bad;
+    if (!isaac_is_guest_va(bitrev) || !isaac_is_guest_va(bitrev + entries * 4u - 1u)) goto bad;
+    /* and every index it will actually use has to land inside x[0..n) */
+    for (k = 0; k < entries; k++) {
+        int32_t idx = (int32_t)isaac_r32(bitrev + k * 4u);
+        int64_t at = (int64_t)half + (int64_t)idx;
+        if (at < 0 || at + 1 >= (int64_t)n) goto bad;
+    }
+    return 1;
+bad:
+    if (!reported) {
+        reported = 1;
+        isaac_log("[isaac][vorbis] mdct_bitreverse refused: lookup 0x%08x n %u trig 0x%08x bitrev 0x%08x x 0x%08x"
+                  " -- the block is skipped rather than trapping the run",
+                  init_va, n, trig, bitrev, x_va);
+    }
+    return 0;
+}

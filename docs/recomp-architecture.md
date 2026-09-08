@@ -7864,6 +7864,52 @@ stays as a rebuilt 19 MB array, so a session that sees the whole payload holds
 -- the background prefetch does not make it worse, it just makes it easier to
 reach.
 
+### 21.111 Round 90: no ending video had ever played, and the module was stale
+
+A player reported `TRAP in main @ 0x00931050: memory access out of bounds`
+during the Womb/Eden ending. `drive_cutscene.mjs` reproduces it on the first
+try through the game's own console (`cutscene <id>`), and the census is worse
+than the report: **cutscenes 4, 5, 6, 7, 8, 9 and 10 all trap.** 1, 2 and 3
+pass -- and cutscenes.xml says why. 1 and 2 (Intro, Credits) have no video at
+all; they are `.anm2` and PNG. That leaves 3, the Epilogue, whose
+`001_Epilogue.ogv` is entry 0 of `videos.a` -- and reading the Ogg headers of
+every entry, **that file is the only one with no Vorbis stream in it**. Every
+video that carries audio trapped. Round 26's "the port plays video" was
+verified on the one silent video in the game.
+
+The fault is in libvorbis, not libtheora: `0x00abb750` is `mdct_bitreverse`,
+reached from `mapping0_inverse` (`0x00acf890`) through `mdct_backward`
+(`0x00abb900`), and it indexes `x[(n>>1) + bitrev[k]]` with no clamp -- the
+loop's only bound is a pointer compare. The music decoder is a different
+library (stb_vorbis, which rounds 49-50 put on the host), so nothing about
+working music says anything about this path.
+
+Two hypotheses were tested and both were wrong, which is worth recording. The
+first was an unlifted callee, as in round 89: a census of the lifter's own
+`missing.txt` against `uncovered.tsv` shows **zero real functions missing** in
+the libvorbis range -- `mdct_init` (`0x00abab70`), `_vds_shared_init` and the
+whole decode chain are all lifted. The second was the value `mdct_init` derives
+`bitrev` from, `log2n = rint(log(n)/log(2))`, which goes through host libm
+shims; `ISAAC_LIBM_TRACE=1` shows those returning correct values.
+
+What actually fixed it was rebuilding the module. Editing a header changed the
+lift dependency fingerprint, all 38 TUs recompiled from current sources, and
+every cutscene tested then played: 4, 5, 6, 9, 17 (Chest) and 22 (The Void),
+1,100-1,600 frames each, no trap. **The wasm the dist was shipping had been
+built from objects older than the tree.** `ship.py build` copies `boot.wasm`
+into the dist; it does not rebuild it, so a stale module survives any number of
+ships and re-uploads -- which is exactly what happened, for rounds.
+
+A guard went in alongside, and it is worth keeping even though it is not what
+fixed this. `WRAP_PATCHES[0x00abb750]` checks the lookup before the lifted body
+runs -- n a power of two in range, trig/bitrev/x inside the arena, and every
+index the loop will use landing inside `x[0..n)` -- and when it does not hold,
+reports the values once and skips the block instead of trapping. A moment of
+wrong audio is not a dead run, and the report names the real bug from a
+player's log. On the rebuilt module it never fires.
+
+Verified on the rebuilt module: mods 37/37, saves 15/15, EDIT FILE 11/11.
+
 ### 21.110 Round 89e-89f: the bar, and the memory that was never given back
 
 **89e, from a player's report: "it stays on a screen for a bit".** Two faults,

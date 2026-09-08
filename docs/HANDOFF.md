@@ -191,6 +191,21 @@ REQUIRE emsdk on PATH:
   in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
   2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
   options, 16 mods, 19 online.
+- **Round 90: no ending video had ever played, and the module was stale**
+  (§21.111). Reported as a trap in the Womb/Eden ending; the census says
+  **cutscenes 4-10 all trap** and only 1, 2, 3 pass — 1 and 2 have no video,
+  and 3's `001_Epilogue.ogv` is **the only entry in `videos.a` with no Vorbis
+  stream**. Every video with audio trapped in libvorbis `mdct_bitreverse`
+  (`0x00abb750`, indexes `x[(n>>1)+bitrev[k]]` unclamped). Music is stb_vorbis
+  and says nothing about this path. Unlifted-callee and libm-shim hypotheses
+  were both tested and refuted. **Rebuilding the module fixed it** — a header
+  edit changed the lift fingerprint, all 38 TUs recompiled, and 4/5/6/9/17/22
+  all play. `ship.py build` copies `boot.wasm`, it does NOT rebuild it, so the
+  dist shipped a module older than the tree for rounds. **After changing lift
+  or host sources, run `build_boot.py --web --fast` before `ship.py build`.**
+  New: `drive_cutscene.mjs` (endings through the console), `profile_load.mjs`
+  (a profile on a loaded floor, which refuses to report when the debug console
+  was left open — Console::Update was a third of the first two attempts).
 - **Round 89e-89f: the bar, and the memory that was never given back** (§21.110).
   The heap was **631 MB and a forced GC moved none of it**: `piece()` kept every
   chunk it ever fetched as a rebuilt ~19.9 MB array. It is an **LRU with a

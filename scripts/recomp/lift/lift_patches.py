@@ -398,6 +398,26 @@ PURGE_PATCHES: dict[str, tuple[int, int]] = {
 # so the equivalence is measured on the game's own data, not assumed.
 # Each entry: va -> wrapper body text; the wrapper owns the callee's ret.
 WRAP_PATCHES: dict[int, str] = {
+    # libvorbis mdct_bitreverse (round 90): init in ecx, x in edx, plain ret.
+    # Every cutscene with a Vorbis audio track trapped inside this with
+    # "memory access out of bounds" -- the ONE ending video with no audio is
+    # the only one that has ever played. It indexes x[(n>>1) + bitrev[k]] with
+    # no clamp of its own, so a lookup that is not the one mdct_init filled
+    # walks out of the arena and ends the run. This is not a speed wrapper:
+    # it checks the lookup, and when it is wrong it reports the values once
+    # and skips the block instead of trapping. Wrong audio for a moment beats
+    # a dead run, and the report is what identifies the real bug from a log.
+    0x00abb750: """void sub_00abb750(CpuState *restrict s) {
+  /* LIFT-PATCH wrap 0x00abb750: guard mdct_bitreverse (host_fastpath.c) */
+  RECOMP_VA(0xabb750u);
+  if (!isaac_vorbis_bitrev_ok(s->ECX, s->EDX)) {
+    s->EIP = MEMR32(s->ESP);
+    s->ESP += 4u;
+    return;
+  }
+  sub_00abb750__lifted(s);
+}
+""",
     # stb_vorbis inverse_mdct (round 50): buffer in ecx, n in edx, (f,
     # blocktype) on the stack, plain ret; writes the n floats at buffer.
     0x00aa38a0: """void sub_00aa38a0(CpuState *restrict s) {
