@@ -852,9 +852,23 @@ PROVIDER_JS = r"""
         // requestIdleCallback fires once the frame loop is yielding, which is
         // the game running; the timeout is the backstop for a page that never
         // goes idle.
+        // and not on idle alone. The boot spends most of its time waiting on
+        // its own reads, which looks idle, so requestIdleCallback fired during
+        // the boot and pulled thirteen more chunks through the cache --
+        // evicting the trail chunks the boot had not finished with, which it
+        // then fetched again. Wait for a frame: that is the game running, and
+        // it is the only signal here that the boot is actually done.
         var later = function () { more(); };
-        if (typeof requestIdleCallback === 'function') requestIdleCallback(later, { timeout: 60000 });
-        else setTimeout(later, 20000);
+        var t0 = Date.now();
+        var whenRunning = function () {
+          if ((window.isaacFrame || 0) > 0 || Date.now() - t0 > 120000) {
+            if (typeof requestIdleCallback === 'function') requestIdleCallback(later, { timeout: 30000 });
+            else setTimeout(later, 5000);
+            return;
+          }
+          setTimeout(whenRunning, 1000);
+        };
+        setTimeout(whenRunning, 1000);
       }
       return ranges;
     })(),
