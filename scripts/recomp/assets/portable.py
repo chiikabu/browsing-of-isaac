@@ -371,7 +371,7 @@ PROVIDER_JS = r"""
   // LRU with a byte budget now. Evicting is safe whenever: a caller has already
   // awaited its chunk and copies out of it, and the array lives as long as that
   // reference does, whether or not the Map still names it.
-  var CACHE_MAX = 160 * 1048576, cacheBytes = 0;
+  var CACHE_MAX = 128 * 1048576, cacheBytes = 0;
   function remember(key, u) {
     var old = cache.get(key);
     if (old) { cache.delete(key); cacheBytes -= old.length; }
@@ -509,7 +509,13 @@ PROVIDER_JS = r"""
   // How far the streamer may run ahead of the reader. Chunks it has fetched
   // that nothing has read yet are the only ones that MUST stay resident, so
   // this number, times ~19.9 MB, is what running ahead costs.
-  var AHEAD = 4, HEAD_ARCHIVE = 3;
+  // AHEAD is the whole trade. At 4 the stream ran no faster than the boot read,
+  // which serialised the two: the game reached its first frame in 11 s and then
+  // sat at frame 2 for another 165 while chunks arrived one every ten seconds.
+  // The fetching has to happen ALONGSIDE the boot, not in lockstep with it, so
+  // this is the number of chunks the streamer may hold unread -- 8 x 19.9 MB --
+  // and the cache budget below is sized to leave room for them.
+  var AHEAD = 8, HEAD_ARCHIVE = 3, STREAM_WIDTH = 6;
   var unread = Object.create(null), unreadN = 0, waiting = [];
   function markUnread(k) { if (!unread[k]) { unread[k] = 1; unreadN += 1; } }
   function markRead(k) {
@@ -813,7 +819,7 @@ PROVIDER_JS = r"""
     return function (which) {
       // the trail's remainder feeds the boot and starts at once; the chunks no
       // boot reads are for a run that wanders, and wait for an idle moment
-      if (which === 'stream') return tail.length ? fetchList(tail, 3, true) : Promise.resolve();
+      if (which === 'stream') return tail.length ? fetchList(tail, STREAM_WIDTH, true) : Promise.resolve();
       return rest.length ? fetchList(rest, 2, true) : Promise.resolve();
     };
   }
