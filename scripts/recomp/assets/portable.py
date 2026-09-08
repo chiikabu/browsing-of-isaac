@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Portable builds of the shipping dist: one page that carries the game.
 
 Two shapes:
@@ -267,10 +267,82 @@ def cut(part: list[dict], size: int, emit) -> int:
     return n
 
 
+class WindowPacker:
+    """Round 89: a chunk whose windows are each compressed on their own.
+
+    The ranged half shipped raw because a window is a byte range inside a large
+    chunk and a range cannot be taken out of a deflate stream. Compressing each
+    1 MiB window SEPARATELY keeps both properties: the chunk still holds a whole
+    number of windows and still rebuilds to exactly the bytes it used to hold,
+    and a single window is still one contiguous range -- just a shorter one.
+
+    What the page needs is the length of each compressed window, in order; every
+    offset follows from that. `z` says which of them are really compressed: a
+    window of Theora or Vorbis gives back 100.0% of what it is handed, so it is
+    stored as it is rather than paying an inflate on every read for nothing.
+    """
+
+    def __init__(self, per_chunk: int, key: bytes, out_dir: str, tag: str, gzfn):
+        self.per_chunk = per_chunk
+        self.key = key
+        self.out_dir = out_dir
+        self.tag = tag
+        self.gzfn = gzfn
+        self.lens: list[int] = []          # compressed length of every window, in order
+        self.flags: list[str] = []         # '1' where that window really is compressed
+        self.chunks = 0
+        self._buf = bytearray()
+        self._in_chunk = 0
+        self._phys = 0                     # where this chunk starts in the stored stream
+        self.written = 0
+
+    def add(self, _i: int, window: bytes) -> None:
+        packed = self.gzfn(window)
+        use = len(packed) <= len(window) - (len(window) >> 6)     # at least 1.6% off
+        body = packed if use else window
+        self.lens.append(len(body))
+        self.flags.append("1" if use else "0")
+        self._buf += body
+        self._in_chunk += 1
+        if self._in_chunk == self.per_chunk:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._buf:
+            return
+        body = scramble(bytes(self._buf), self._phys, self.key)
+        with open(os.path.join(self.out_dir, "%s%d.bin" % (self.tag, self.chunks)), "wb") as f:
+            f.write(body)
+        self.written += len(body)
+        self._phys += len(self._buf)
+        self._buf = bytearray()
+        self._in_chunk = 0
+        self.chunks += 1
+
+
 def index_for(dist: str, files: list[dict]) -> list[dict]:
     have = {f["instance"] for f in files if "instance" in f}
     index = json.loads(read(os.path.join(dist, "instance_index.json")).decode("utf-8"))
     return [e for e in index if e["p"] in have]
+
+
+def _strip_local(node):
+    """Anything that names where this was built, gone.
+
+    dist.json records the directories it was assembled from -- the bundle, the
+    module, the segs, the web sources -- as absolute paths. Those are useful in
+    a build log and have no business in a page served to the public: they carry
+    the account name of whoever ran the build. This drops the `sources` block
+    and any remaining absolute path, wherever it sits.
+    """
+    if isinstance(node, dict):
+        return {k: _strip_local(v) for k, v in node.items()
+                if k not in ("sources", "dir", "root", "cwd", "out")}
+    if isinstance(node, list):
+        return [_strip_local(v) for v in node]
+    if isinstance(node, str) and re.match(r"^(?:[A-Za-z]:[\\/]|[\\/]{1,2}[^\\/])", node):
+        return os.path.basename(node.replace("\\", "/").rstrip("/")) or "(path)"
+    return node
 
 
 def manifest_for(dist: str, files: list[dict]) -> dict:
@@ -280,7 +352,7 @@ def manifest_for(dist: str, files: list[dict]) -> dict:
         m = {}
     keep = {f["dist"] for f in files}
     m["files"] = [f for f in (m.get("files") or []) if f.get("path") in keep]
-    return m
+    return _strip_local(m)
 
 
 def page_source(dist: str) -> str:
@@ -348,23 +420,80 @@ PROVIDER_JS = r"""
     var z = S[s].z;
     return z ? z.charAt(i) === '1' : true;
   }
+  // Round 89: a window-compressed stream. `wl` is the stored length of every
+  // window in order, so every offset follows from a prefix sum; `wz` says which
+  // of them really are compressed. The chunk still holds a whole number of
+  // windows and still rebuilds to the bytes it always held.
+  var WOFF = null;
+  function woff(s) {
+    if (WOFF) return WOFF;
+    var wl = S[s].wl, a = new Array(wl.length + 1);
+    a[0] = 0;
+    for (var k = 0; k < wl.length; k++) a[k + 1] = a[k] + wl[k];
+    WOFF = a;
+    return a;
+  }
+  function perChunk(s) { return S[s].size / S[s].win; }
+  async function inflate(bytes) {
+    return new Uint8Array(await new Response(
+      new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+  }
+  // one window, from its own stored bytes
+  async function window1(s, k, stored) {
+    return S[s].wz.charAt(k) === '1' ? await inflate(stored) : stored;
+  }
+  // a whole chunk, rebuilt from the windows it holds
+  async function rebuild(s, i, stored) {
+    var off = woff(s), per = perChunk(s), base = i * per;
+    var first = off[base], parts = [], total = 0;
+    for (var k = base; k < off.length - 1 && k < base + per; k++) {
+      var b = stored.subarray(off[k] - first, off[k + 1] - first);
+      var w = await window1(s, k, b);
+      parts.push(w); total += w.length;
+    }
+    var out = new Uint8Array(total), at = 0;
+    for (var j = 0; j < parts.length; j++) { out.set(parts[j], at); at += parts[j].length; }
+    return out;
+  }
   async function piece(s, i) {
     var key = s + ':' + i, hit = cache.get(key);
     if (hit) return hit;
     var r = await fetch(name(s, i));
     if (!r.ok) throw new Error('piece ' + key + ': HTTP ' + r.status);
     note(s, i);
-    var raw = unscramble(new Uint8Array(await r.arrayBuffer()), i * S[s].size);
-    var u = packed(s, i)
-      ? new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer())
-      : raw;
+    var at = S[s].wl ? woff(s)[i * perChunk(s)] : i * S[s].size;
+    var raw = unscramble(new Uint8Array(await r.arrayBuffer()), at);
+    var u = S[s].wl ? await rebuild(s, i, raw)
+      : (packed(s, i)
+        ? new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer())
+        : raw);
     cache.set(key, u);
     return u;
+  }
+  // where a read lands when the chunk's windows are compressed one by one:
+  // which window, how far into it, and where that window is stored
+  function inWindow(p) {
+    var st = S[p.s];
+    if (!st.wl) return null;
+    var per = perChunk(p.s), k = p.i * per + Math.floor(p.within / st.win);
+    var at = p.within % st.win;
+    if (at + p.take > st.win) return null;          // straddles two windows
+    var off = woff(p.s), base = off[p.i * per];
+    return { k: k, at: at, from: off[k] - base, to: off[k + 1] - base - 1, abs: off[k] };
   }
   async function ranged(p) {
     // a window is a byte range inside a large chunk, so the chunk's size costs
     // nothing; a host that ignores Range answers 200 and we slice it ourselves
     if (!ranges) return (await piece(p.s, p.i)).subarray(p.within, p.within + p.take);
+    var w = inWindow(p);
+    if (w) {
+      var rw = await fetch(name(p.s, p.i), { headers: { Range: 'bytes=' + w.from + '-' + w.to } });
+      if (!rw.ok) throw new Error('range ' + p.s + ':' + p.i + ': HTTP ' + rw.status);
+      note(p.s, p.i);
+      var stored = unscramble(new Uint8Array(await rw.arrayBuffer()), w.abs);
+      var win = await window1(p.s, w.k, stored);
+      return win.subarray(w.at, w.at + p.take);
+    }
     var r = await fetch(name(p.s, p.i), { headers: { Range: 'bytes=' + p.within + '-' + (p.within + p.take - 1) } });
     if (!r.ok) throw new Error('range ' + p.s + ':' + p.i + ': HTTP ' + r.status);
     var u = new Uint8Array(await r.arrayBuffer());
@@ -420,6 +549,11 @@ PROVIDER_JS = r"""
   // a gzipped one is compressed per chunk and its length is not arithmetic.
   function chunkLen(s, i) {
     var st = S[s];
+    if (st.wl) {                       // stored length: the windows it holds
+      var off = woff(s), per = perChunk(s);
+      var a = i * per, b = Math.min(off.length - 1, a + per);
+      return off[b] - off[a];
+    }
     if (st.gz || typeof st.bytes !== 'number') return -1;
     var left = st.bytes - i * st.size;
     return left > st.size ? st.size : left;
@@ -529,17 +663,18 @@ PROVIDER_JS = r"""
       // own start, gunzips, and cuts the slice the read wanted. `@pos` is what
       // the keystream needs; the range before it is inside the WINDOW, not
       // inside the chunk, which is why this is a different fragment from #r=.
-      if (S[p.s].gz) {
-        // Only when the chunk IS a window. Part A's pieces are tens of MB and
-        // are read whole by the page itself; handing one to the Worker would
-        // fetch all of it to serve one small read, which is a boot that does
-        // not finish. `!1` says this chunk really is compressed -- a window
-        // that gave nothing back is stored raw and must not meet an inflater.
-        if (S[p.s].size > WIN) return null;
-        return name(p.s, p.i) + '#g=' + p.within + '-' + (p.within + p.take - 1)
-          + '@' + (p.i * S[p.s].size) + '!' + (packed(p.s, p.i) ? 1 : 0);
-      }
+      if (S[p.s].gz) return null;   // part A is read whole by the page itself
       if (!ranges) return null;
+      // Round 89: the window's own stored bytes are a range like any other --
+      // shorter, and the Worker unwraps them. `!z` says whether this particular
+      // window is compressed at all, and `*at-take` is the cut inside it.
+      var w = inWindow(p);
+      if (w) {
+        return name(p.s, p.i) + '#w=' + w.from + '-' + w.to + '@' + w.abs
+          + '!' + (S[p.s].wz.charAt(w.k) === '1' ? 1 : 0)
+          + '*' + w.at + '-' + p.take;
+      }
+      if (S[p.s].wl) return null;   // straddles two windows: the bytes path serves it
       // the range rides in the fragment, which no server sees; `@pos` after it is
       // where those bytes start in the stream, which is what unscrambles them
       // `!len` is the chunk's own length: the Worker has nothing else to check a
@@ -629,10 +764,10 @@ def cmd_chunks(args) -> int:
     # inflate is not involved: this layer is unwrapped before the engine sees a
     # byte. It is only offered when the chunk is exactly a window, because a
     # bigger compressed chunk could not be entered at an offset.
-    b_gz = bool(args.window_gz) and b_size == WINDOW
-    if args.window_gz and not b_gz:
-        raise SystemExit("--window-gz needs --part-mib 1: a compressed chunk can only be "
-                         "read whole, so the chunk has to be exactly one window")
+    # The chunk keeps its size and its logical contents; only the way it is
+    # stored changes, so the file count does not move.
+    b_wingz = bool(args.window_gz)
+    b_gz = False
     written = [0]
 
     # Round 80: the seed is the two stream lengths, so a build that adds one file
@@ -695,7 +830,14 @@ def cmd_chunks(args) -> int:
                          for n in os.listdir(data_dir) if n.endswith(".bin"))
     else:
         n_a = cut(whole, a_size, emit_for("a", True, a_size))
-        n_b = cut(windowed, b_size, emit_for("b", b_gz, b_size))
+        if b_wingz:
+            packer = WindowPacker(b_size // WINDOW, key, data_dir, "b", _gzip)
+            cut(windowed, WINDOW, packer.add)
+            packer.flush()
+            n_b = packer.chunks
+            written[0] += packer.written
+        else:
+            n_b = cut(windowed, b_size, emit_for("b", b_gz, b_size))
     # Round 86d: a token per chunk, from that chunk's own bytes, which rides in
     # its URL. jsDelivr answers these with `max-age=604800`, so a returning
     # visitor keeps chunks for a week -- and a rebuild that changes only part A
@@ -724,6 +866,13 @@ def cmd_chunks(args) -> int:
     for st in streams:
         if st["gz"] and zflag.get(st["tag"]):
             st["z"] = "".join(str(x) for x in zflag[st["tag"]])
+    # a window-compressed stream carries the length of every window instead: the
+    # chunk still holds `size / WINDOW` of them and still rebuilds to the same
+    # bytes, so nothing else about the layout moves
+    if b_wingz and not args.html_only:
+        streams[1]["wl"] = packer.lens
+        streams[1]["wz"] = "".join(packer.flags)
+        streams[1]["win"] = WINDOW
     data = {"streams": streams, "files": table, "base": args.base or "./c",
             "index": index_for(args.dist, files), "manifest": manifest_for(args.dist, files),
             "chunks": n_a + n_b, "status": "loading"}

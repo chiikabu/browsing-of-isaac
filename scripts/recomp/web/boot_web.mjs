@@ -276,20 +276,28 @@ function start(key, url, len, why, want) {
   // the byte range in the fragment, which no server ever sees. A host that ignores
   // Range sends the whole chunk, so the body is cut to size here.
   let init, want0 = -1, want1 = -1, at = -1, chunkBytes = -1;
-  // round 89: a gzipped chunk is exactly one window, so there is no range to
-  // ask for. Take the whole file, unscramble from the chunk's own start,
-  // gunzip, and cut the slice the read wanted out of the window.
-  let gz0 = -1, gz1 = -1, gzAt = -1, gzPacked = 1;
-  const g = url.indexOf('#g=');
+  // Round 89: the ranged half stores each 1 MiB window compressed on its own,
+  // so a window is still one contiguous range -- just a shorter one. The
+  // fragment carries that range, the position the keystream needs, whether this
+  // particular window is compressed at all (a Vorbis window is not), and the
+  // cut to make inside the window once it is unwrapped.
+  let winAt = -1, winPacked = 1, winFrom = 0, winTake = 0;
+  const g = url.indexOf('#w=');
   if (g >= 0) {
     let frag = url.slice(g + 3);
+    const star = frag.indexOf('*');
+    const cutSpec = frag.slice(star + 1).split('-');
+    winFrom = +cutSpec[0]; winTake = +cutSpec[1];
+    frag = frag.slice(0, star);
     const bang = frag.indexOf('!');
-    if (bang >= 0) { gzPacked = +frag.slice(bang + 1); frag = frag.slice(0, bang); }
+    winPacked = +frag.slice(bang + 1);
+    frag = frag.slice(0, bang);
     const cut = frag.indexOf('@');
-    gzAt = +frag.slice(cut + 1);
+    winAt = +frag.slice(cut + 1);
     const r = frag.slice(0, cut).split('-');
-    gz0 = +r[0]; gz1 = +r[1];
+    want0 = +r[0]; want1 = +r[1];
     url = url.slice(0, g);
+    init = { headers: { Range: 'bytes=' + want0 + '-' + want1 } };
   }
   const h = url.indexOf('#r=');
   if (h >= 0) {
@@ -337,17 +345,16 @@ function start(key, url, len, why, want) {
     return await r.arrayBuffer();
   };
   tries().then(async (buf) => {
-    if (buf && gzAt >= 0) {
-      // the whole chunk, unscrambled from its own start, then gunzipped if it
-      // really is compressed; the window that comes out is cut to the slice the
-      // read asked for
-      const plain = unscramble(buf, gzAt);
-      let win = new Uint8Array(plain);
-      if (gzPacked) {
+    if (buf && winAt >= 0) {
+      // a host that ignored the Range sent the whole chunk: the window's own
+      // bytes still start where the fragment said
+      if (buf.byteLength > want1 - want0 + 1) buf = buf.slice(want0, want1 + 1);
+      let win = unscramble(buf, winAt);
+      if (winPacked) {
         const ds = new DecompressionStream('gzip');
-        win = new Uint8Array(await new Response(new Blob([plain]).stream().pipeThrough(ds)).arrayBuffer());
+        win = new Uint8Array(await new Response(new Blob([win]).stream().pipeThrough(ds)).arrayBuffer());
       }
-      buf = win.slice(gz0, gz1 + 1).buffer;
+      buf = win.slice(winFrom, winFrom + winTake).buffer;
     }
     // a host that ignored the Range sent the whole chunk: put it back from the
     // chunk's own start, then cut out the window

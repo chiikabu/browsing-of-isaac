@@ -51,12 +51,10 @@ test('a window is a byte range inside a large chunk, and the payload is a dozen 
   assert.match(portable, /if \(!ranges\) return null;/, 'no range support, no URL: the bytes path serves it');
   assert.match(portable, /if \(!parts \|\| parts\.length !== 1\) return null;/,
     'a window that straddles two chunks is not a range');
-  // Round 89 revisited the choice this test records. A compressed chunk still
-  // cannot be entered at an offset -- but when the chunk IS the window there is
-  // no offset to enter at, so it is fetched whole and gunzipped instead, and
-  // only a chunk larger than a window falls back to the bytes path.
-  assert.match(portable, /if \(S\[p\.s\]\.size > WIN\) return null;/,
-    'a compressed chunk bigger than a window is still not a range');
+  // Round 89 kept this shape and changed only how a chunk is stored: its
+  // windows are compressed one by one, so a window is still one contiguous
+  // range, just a shorter one. Part A is still read whole by the page.
+  assert.match(portable, /if \(S\[p\.s\]\.gz\) return null;   \/\/ part A is read whole by the page itself/);
   assert.match(portable, /return name\(p\.s, p\.i\) \+ '#r=' \+ p\.within \+ '-' \+ \(p\.within \+ p\.take - 1\)/,
     'the range rides in the fragment, which no server ever sees');
   // windowed archives are padded up to the window so a read never crosses a cut
@@ -362,26 +360,22 @@ test('round 88: the whole-read chunks may be zopfli, and it stays gzip', () => {
   assert.match(p, /"--zopfli", action="store_true"/, 'it is opt-in');
 });
 
-test('round 89: a chunk that is a window is compressed, and not prefetched whole', () => {
+test('round 89: a chunk stores its windows compressed one by one', () => {
+  // The chunk keeps its size, its window count and the bytes it rebuilds to;
+  // only the way it is stored changes, so the file count does not move -- 32
+  // chunks, not 525. A window is still one contiguous range, just shorter.
   const p = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'portable.py'), 'utf8');
-  // the ranged half may only be compressed when the chunk is exactly a window:
-  // a bigger compressed chunk could not be entered at an offset
-  assert.match(p, /b_gz = bool\(args\.window_gz\) and b_size == WINDOW/);
-  assert.match(p, /--window-gz needs --part-mib 1/, 'and it says so rather than shipping something unreadable');
-  // only when it actually saves something: Theora and Vorbis windows give back
-  // 100% and would pay an inflate on every read for nothing
-  assert.match(p, /if len\(packed\) <= len\(b\) - \(len\(b\) >> 6\):/);
-  // which chunks are compressed is recorded, not sniffed: a raw window can
-  // start with the gzip magic by chance
-  assert.match(p, /st\["z"\] = "".join\(str\(x\) for x in zflag\[st\["tag"\]\]\)/);
-  assert.match(p, /function packed\(s, i\)/, 'and the page reads that mark');
-  // the whole-chunk path is only for chunks that are a window
-  assert.match(p, /if \(S\[p\.s\]\.size > WIN\) return null;/);
-  // and the prefetch-everything defence is for chunks bigger than a window only
-  assert.match(p, /if \(S\[s\]\.size <= WIN\) continue;/,
-    'a stream whose piece is a window has nothing to amortise');
+  assert.match(p, /class WindowPacker:/, 'the packer that compresses each window on its own');
+  assert.match(p, /use = len\(packed\) <= len\(window\) - \(len\(window\) >> 6\)/,
+    'a window is only stored compressed when it saves at least 1.6%');
+  assert.match(p, /streams\[1\]\["wl"\] = packer\.lens/, 'the page gets every window length');
+  assert.match(p, /streams\[1\]\["wz"\] = ""\.join\(packer\.flags\)/,
+    'and which are really compressed -- Theora and Vorbis give nothing back');
+  assert.match(p, /function inWindow\(p\)/, 'the page maps a read to its window');
+  assert.match(p, /async function rebuild\(s, i, stored\)/,
+    'and rebuilds a whole chunk where ranges are not to be trusted');
 
   const b = readFileSync(join(root, 'scripts', 'recomp', 'web', 'boot_web.mjs'), 'utf8');
-  assert.match(b, /const g = url\.indexOf\('#g='\);/, 'the Worker knows the whole-chunk window fragment');
-  assert.match(b, /if \(gzPacked\) \{/, 'and only inflates a chunk that really is compressed');
+  assert.match(b, /const g = url\.indexOf\('#w='\);/, 'the Worker knows the window fragment');
+  assert.match(b, /if \(winPacked\) \{/, 'and only inflates a window that really is compressed');
 });
