@@ -7665,3 +7665,59 @@ the table can already point two keys at one extent, so it is there to take if it
 ever grows); shadowed entries (0.8 MB, already handled); and videos, music, sfx
 and graphics, which are at entropy already -- gzip and brotli both return 100.0%
 of what they are given.
+
+### 21.106 Round 89: when the chunk is the window, the chunk can be compressed
+
+Part B -- the four archives the engine reads as 1 MiB windows -- shipped raw,
+because a window is a byte range inside a large chunk and a range cannot be
+taken out of a deflate stream. `--part-mib 1` already existed for hosts whose
+ranges lie: it makes the chunk exactly one window, and then nothing is ever
+fetched by range. At that size the reason for storing it raw is gone. The
+reader takes such a chunk whole, so it can be gzipped like part A, and the page
+already has the decoder -- `DecompressionStream('gzip')`, native.
+
+    payload   563.6 -> 543.9 MB     (-19.7)
+    on top of round 88's archives:  575.6 -> 543.9 MB total
+
+Two details earned their place. A window of Theora or Vorbis hands back 100.0%
+of what it is given, and about 150 MB of the payload is exactly that, so a
+chunk is only stored compressed when it saves at least 1.6% -- and which ones
+did is a per-chunk mark in the manifest, not a sniff of the gzip magic at read
+time, because a raw window can begin with those two bytes by chance and 522
+windows make that a 1-in-125 bet. And part A's pieces are tens of MB: handing
+one to the Worker as if it were a window fetches all of it to serve one small
+read, which is a boot that does not finish (measured).
+
+**But the download is the real result, and it is not the compression.** The
+chunked build has always called `prefetchAll()` -- every piece, before the
+engine starts -- because with 19 MB chunks and untrustworthy ranges a window
+costs 19 MB and doing that mid-room is the freeze (round 78). When the chunk IS
+the window there is nothing to amortise: a whole GET costs exactly what the read
+wanted. Skipping the prefetch for such a stream turns a first visit from *the
+whole payload* into the windows it actually touches. Cold, at 25 Mbit/s on a
+4x-throttled core:
+
+                        payload    first visit    first frame
+    ranges (as shipped) 563.6 MB   all of it        197.3 s
+    one chunk per window 543.9 MB   224 MB            17.3 s
+
+With a trail recorded for the new layout, the misses fall from 13 to 2 and the
+waits from 10.4 s to 3.9 s.
+
+The costs, stated plainly: 525 files instead of 33, and on localhost -- where
+the download is free and the inflate has nothing to hide behind -- a 4x-throttled
+boot to a run goes 22.9 -> 27.2 s. That is the worst case for this change and
+the best case for the old one; on any real link the 340 MB it does not fetch is
+worth far more. Play is unaffected: 54.4 fps against 54.0.
+
+Verified: `?ISAAC_ARCHIVE_VERIFY=1` checksums every entry through the engine's
+own decoder over the new layout with no mismatch, 11,100 frames at ~18 ms, and
+mods 37/37, saves 15/15, EDIT FILE 11/11.
+
+One hour went into a boot that stopped after two frames with no error. The page
+was carrying a **stale copy of boot_web.mjs**: the fragment had grown a `!1`
+suffix and the old Worker parsed `@0!1` as NaN, unscrambling from a garbage
+offset. `portable.py` inlines the modules from the dist, so a change to
+boot_web.mjs needs `ship.py build` before the chunks are rebuilt. That is the
+third time this project has lost time to reading something other than what it
+had just written.

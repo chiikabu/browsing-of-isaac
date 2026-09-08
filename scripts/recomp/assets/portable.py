@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Portable builds of the shipping dist: one page that carries the game.
 
 Two shapes:
@@ -291,6 +291,7 @@ PROVIDER_JS = r"""
 (function () {
   var P = window.__isaacPortableData;
   var S = P.streams;                                  // one per byte run: {tag,size,gz}
+  var WIN = 1048576;                                  // the engine's window (FS_WIN), and the read granularity
   var cache = new Map(), inline = P.blobs || null, ranges = true;
   // round 77: the chunks are XORed with a seekable keystream so a file on a CDN
   // is not a recognisable archive. Reversible from any offset, which is what a
@@ -338,6 +339,15 @@ PROVIDER_JS = r"""
     var v = S[s].v && S[s].v[i];
     return P.base + '/' + S[s].tag + i + '.bin' + (v ? '?v=' + v : '');
   }
+  // Is chunk i of stream s actually compressed? A stream may be gzipped and
+  // still hold raw chunks: a window of Theora or Vorbis gives nothing back, so
+  // it is stored as it is and costs no inflate here (round 89). Without the
+  // per-chunk mark the whole stream is compressed, which is what part A is.
+  function packed(s, i) {
+    if (!S[s].gz) return false;
+    var z = S[s].z;
+    return z ? z.charAt(i) === '1' : true;
+  }
   async function piece(s, i) {
     var key = s + ':' + i, hit = cache.get(key);
     if (hit) return hit;
@@ -345,7 +355,7 @@ PROVIDER_JS = r"""
     if (!r.ok) throw new Error('piece ' + key + ': HTTP ' + r.status);
     note(s, i);
     var raw = unscramble(new Uint8Array(await r.arrayBuffer()), i * S[s].size);
-    var u = S[s].gz
+    var u = packed(s, i)
       ? new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer())
       : raw;
     cache.set(key, u);
@@ -465,6 +475,11 @@ PROVIDER_JS = r"""
   async function prefetchAll() {
     var jobs = [], s, i, n;
     for (s = 0; s < S.length; s++) {
+      // Round 89: a stream whose piece IS a window has nothing to amortise -- a
+      // whole GET costs exactly what the read wanted. Pulling all of those
+      // would fetch the entire payload to serve the ~180 windows a boot
+      // touches: measured at 724 MB against 175.
+      if (S[s].size <= WIN) continue;
       n = count(s);
       for (i = 0; i < n; i++) jobs.push([s, i]);
     }
@@ -493,6 +508,7 @@ PROVIDER_JS = r"""
       await probeRanges();
       // Always pull every piece before the engine starts. jsDelivr's ranges
       // lie, so a window is a 19 MB GET; doing that mid-room is the freeze.
+      //
       await prefetchAll();
       return ranges;
     })(),
@@ -504,10 +520,26 @@ PROVIDER_JS = r"""
     // a window inside one raw chunk is a URL with the range in its fragment; the
     // reader Worker strips it and sends a Range header (boot_web.mjs)
     urlFor: P.base ? function (rel, off, len) {
-      if (!len || !ranges) return null;
+      if (!len) return null;
       var parts = locate(rel, off, len);
-      if (!parts || parts.length !== 1 || S[parts[0].s].gz) return null;
+      if (!parts || parts.length !== 1) return null;
       var p = parts[0];
+      // Round 89: a gzipped chunk is one window, so there is no range to ask
+      // for -- the Worker takes the whole file, unscrambles it from the chunk's
+      // own start, gunzips, and cuts the slice the read wanted. `@pos` is what
+      // the keystream needs; the range before it is inside the WINDOW, not
+      // inside the chunk, which is why this is a different fragment from #r=.
+      if (S[p.s].gz) {
+        // Only when the chunk IS a window. Part A's pieces are tens of MB and
+        // are read whole by the page itself; handing one to the Worker would
+        // fetch all of it to serve one small read, which is a boot that does
+        // not finish. `!1` says this chunk really is compressed -- a window
+        // that gave nothing back is stored raw and must not meet an inflater.
+        if (S[p.s].size > WIN) return null;
+        return name(p.s, p.i) + '#g=' + p.within + '-' + (p.within + p.take - 1)
+          + '@' + (p.i * S[p.s].size) + '!' + (packed(p.s, p.i) ? 1 : 0);
+      }
+      if (!ranges) return null;
       // the range rides in the fragment, which no server sees; `@pos` after it is
       // where those bytes start in the stream, which is what unscrambles them
       // `!len` is the chunk's own length: the Worker has nothing else to check a
@@ -590,6 +622,17 @@ def cmd_chunks(args) -> int:
         # ranges cannot be trusted -- jsDelivr answers them with the wrong bytes --
         # costs nothing extra. The price is a lot of files.
         b_size = max(WINDOW, args.part_mib * MIB // WINDOW * WINDOW)
+    # Round 89: a chunk that IS one window can be compressed, because the reader
+    # takes it whole and never asks for a range inside it. That is worth 19.3 MB
+    # over the ranged half -- the archives are deflate inside, but the windows
+    # still hold 5% they never had a chance to remove, and the engine's own
+    # inflate is not involved: this layer is unwrapped before the engine sees a
+    # byte. It is only offered when the chunk is exactly a window, because a
+    # bigger compressed chunk could not be entered at an offset.
+    b_gz = bool(args.window_gz) and b_size == WINDOW
+    if args.window_gz and not b_gz:
+        raise SystemExit("--window-gz needs --part-mib 1: a compressed chunk can only be "
+                         "read whole, so the chunk has to be exactly one window")
     written = [0]
 
     # Round 80: the seed is the two stream lengths, so a build that adds one file
@@ -623,9 +666,22 @@ def cmd_chunks(args) -> int:
             raise SystemExit("--zopfli needs the zopfli package (pip install zopfli)")
         return zopfli.gzip.compress(b)
 
+    # Round 89: which chunks of a compressed stream actually ARE compressed. A
+    # window of Theora or Vorbis gives back 100.0% of what it is handed, so
+    # compressing it buys nothing and costs an inflate on every read of it --
+    # about 150 MB of the payload is exactly that. Such a window is stored raw
+    # and marked here, rather than sniffed at read time: a raw window can begin
+    # with the gzip magic by chance, and 522 windows make that a 1-in-125 bet.
+    zflag = {}
+
     def emit_for(tag, gz, size):
         def emit(i, b):
-            body = _gzip(b) if gz else b
+            body = b
+            if gz:
+                packed = _gzip(b)
+                if len(packed) <= len(b) - (len(b) >> 6):      # at least 1.6% off
+                    body = packed
+                zflag.setdefault(tag, []).append(1 if body is not b else 0)
             body = scramble(body, i * size, key)
             with open(os.path.join(data_dir, "%s%d.bin" % (tag, i)), "wb") as f:
                 f.write(body)
@@ -639,7 +695,7 @@ def cmd_chunks(args) -> int:
                          for n in os.listdir(data_dir) if n.endswith(".bin"))
     else:
         n_a = cut(whole, a_size, emit_for("a", True, a_size))
-        n_b = cut(windowed, b_size, emit_for("b", False, b_size))
+        n_b = cut(windowed, b_size, emit_for("b", b_gz, b_size))
     # Round 86d: a token per chunk, from that chunk's own bytes, which rides in
     # its URL. jsDelivr answers these with `max-age=604800`, so a returning
     # visitor keeps chunks for a week -- and a rebuild that changes only part A
@@ -662,8 +718,12 @@ def cmd_chunks(args) -> int:
 
     streams = [{"tag": "a", "size": a_size, "gz": True, "n": n_a, "bytes": a_len,
                 "v": chunk_tokens("a", n_a)},
-               {"tag": "b", "size": b_size, "gz": False, "n": n_b, "bytes": b_len,
+               {"tag": "b", "size": b_size, "gz": b_gz, "n": n_b, "bytes": b_len,
                 "v": chunk_tokens("b", n_b)}]
+    # a compressed stream carries which of its chunks really are compressed
+    for st in streams:
+        if st["gz"] and zflag.get(st["tag"]):
+            st["z"] = "".join(str(x) for x in zflag[st["tag"]])
     data = {"streams": streams, "files": table, "base": args.base or "./c",
             "index": index_for(args.dist, files), "manifest": manifest_for(args.dist, files),
             "chunks": n_a + n_b, "status": "loading"}
@@ -774,6 +834,10 @@ def main(argv=None) -> int:
                    help="leave the chunks as they are and the page readable (the default scrambles both)")
     p.add_argument("--html-only", action="store_true",
                    help="rewrite the page without touching the chunk files (the probe, not the payload)")
+    p.add_argument("--window-gz", action="store_true",
+                   help="compress the ranged half too, one chunk per window (needs --part-mib 1). "
+                        "The reader takes such a chunk whole, so it can be gzipped like part A: "
+                        "-19.3 MB, and no byte range is ever asked for (round 89)")
     p.add_argument("--zopfli", action="store_true",
                    help="compress the whole-read chunks with zopfli instead of gzip -9 -- the same "
                         "gzip format the page already decodes, ~0.55 MB smaller, ~6 minutes slower "

@@ -276,6 +276,21 @@ function start(key, url, len, why, want) {
   // the byte range in the fragment, which no server ever sees. A host that ignores
   // Range sends the whole chunk, so the body is cut to size here.
   let init, want0 = -1, want1 = -1, at = -1, chunkBytes = -1;
+  // round 89: a gzipped chunk is exactly one window, so there is no range to
+  // ask for. Take the whole file, unscramble from the chunk's own start,
+  // gunzip, and cut the slice the read wanted out of the window.
+  let gz0 = -1, gz1 = -1, gzAt = -1, gzPacked = 1;
+  const g = url.indexOf('#g=');
+  if (g >= 0) {
+    let frag = url.slice(g + 3);
+    const bang = frag.indexOf('!');
+    if (bang >= 0) { gzPacked = +frag.slice(bang + 1); frag = frag.slice(0, bang); }
+    const cut = frag.indexOf('@');
+    gzAt = +frag.slice(cut + 1);
+    const r = frag.slice(0, cut).split('-');
+    gz0 = +r[0]; gz1 = +r[1];
+    url = url.slice(0, g);
+  }
   const h = url.indexOf('#r=');
   if (h >= 0) {
     let frag = url.slice(h + 3);
@@ -321,10 +336,22 @@ function start(key, url, len, why, want) {
     if (!r.ok) throw new Error('whole chunk: HTTP ' + r.status);
     return await r.arrayBuffer();
   };
-  tries().then((buf) => {
+  tries().then(async (buf) => {
+    if (buf && gzAt >= 0) {
+      // the whole chunk, unscrambled from its own start, then gunzipped if it
+      // really is compressed; the window that comes out is cut to the slice the
+      // read asked for
+      const plain = unscramble(buf, gzAt);
+      let win = new Uint8Array(plain);
+      if (gzPacked) {
+        const ds = new DecompressionStream('gzip');
+        win = new Uint8Array(await new Response(new Blob([plain]).stream().pipeThrough(ds)).arrayBuffer());
+      }
+      buf = win.slice(gz0, gz1 + 1).buffer;
+    }
     // a host that ignored the Range sent the whole chunk: put it back from the
     // chunk's own start, then cut out the window
-    if (buf && want0 >= 0 && buf.byteLength > want1 - want0 + 1) buf = unscramble(buf, at >= 0 ? at - want0 : -1).slice(want0, want1 + 1);
+    else if (buf && want0 >= 0 && buf.byteLength > want1 - want0 + 1) buf = unscramble(buf, at >= 0 ? at - want0 : -1).slice(want0, want1 + 1);
     else if (buf && at >= 0) buf = unscramble(buf, at);
     const w = inflight.get(key); inflight.delete(key); held -= len; inflightBytes -= len;
     if (w) { done.add(key); postMessage({ want: w, buf, hit: why !== 'want', pf: prefetched, ah: ahead }, buf ? [buf] : []); }

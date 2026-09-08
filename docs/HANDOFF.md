@@ -191,6 +191,18 @@ REQUIRE emsdk on PATH:
   in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
   2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
   options, 16 mods, 19 online.
+- **Round 89: when the chunk is the window, the chunk can be compressed** (§21.106).
+  `--part-mib 1 --window-gz`: the ranged half becomes one gzipped chunk per
+  window, which the reader takes whole, so no byte range is ever asked for and
+  the page decodes it with the native `DecompressionStream('gzip')`. Payload
+  563.6 -> **543.9 MB**. The bigger result is the download: `prefetchAll()`
+  exists because a window used to cost a 19 MB GET, and when the chunk IS the
+  window there is nothing to amortise -- a first visit fetches **224 MB instead
+  of the whole payload**, and at 25 Mbit/s on a 4x core the first frame goes
+  **197.3 s -> 17.3 s**. Costs: 525 files instead of 33, and a localhost boot
+  (no download to hide the inflate behind) 22.9 -> 27.2 s. A chunk is only
+  stored compressed when it saves 1.6%, marked per chunk in the manifest --
+  Theora and Vorbis windows give nothing back and must not pay an inflate.
 - **Round 88: one deflate stream per entry** (§21.105). The packer built a fresh
   deflate stream for every 0x400 block, so no match reached past a kilobyte --
   but the reader feeds every piece into the SAME tinfl state
