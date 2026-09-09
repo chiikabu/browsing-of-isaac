@@ -68,6 +68,8 @@ void isaac_fast_inverse_mdct(uint32_t buf_va, uint32_t n, uint32_t f_va, uint32_
 int  isaac_fast_inverse_mdct_ok(uint32_t buf_va, uint32_t n, uint32_t f_va, uint32_t bt);
 /* libvorbis mdct_bitreverse's lookup, checked before the lifted body runs */
 int  isaac_vorbis_bitrev_ok(uint32_t init_va, uint32_t x_va);
+int  isaac_fast_quad_copy_ok(uint32_t self_va, uint32_t src_va);
+void isaac_fast_quad_copy(uint32_t self_va, uint32_t src_va);
 int  isaac_editfile_gate(uint32_t menu_va);   /* round 52: the page's EDIT FILE menu (host_shims_win.c) */
 /* round 27 (host_fastpath.c): the archive keystream, ArchivedFile::read, the engine Mutex */
 int  isaac_fast_guest_range(uint32_t va, uint32_t len);

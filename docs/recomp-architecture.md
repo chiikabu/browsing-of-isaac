@@ -7894,22 +7894,69 @@ that goes. Against an update root that grows 2.0x and most of the tree 1.1-2.0x:
     sub_00806c20      0 -> 3,595 ms
     sub_0080ea80  1,038 -> 5,070 ms     4.9x
 
-That chain is the whole superlinearity, and it is the one a player already
-reported as "5.57 s on enemy queries" -- the same 5 s, found independently.
-`0x0040a0d0` has **127 direct callers**, tests two byte flags on its object and
-walks two lists at +0x30 and +0x50; `0x0040a030` iterates a counted array of
-function pointers and calls each; `0x00409120` is 447 instructions with a
-488-byte frame and SEH, and it is what the per-element calls land in. It is the
-engine's generic per-entity notify, and with n entities each notifying over
-lists that grow with n, the cost is quadratic in the room's population.
+**Corrected in round 90d.** The paragraphs that stood here named this chain a
+quadratic per-entity notify with a per-frame sort under it. A census against
+the export index and the Ghidra decompiles says otherwise on nearly every
+point, and the earlier reading was guesswork dressed as fact:
 
-Not yet optimised, and worth saying why. `sub_00a671b0`, the hottest single leaf
-(4.5% self), recurses and divides pointer differences by 28 and 36 -- it is a
-sort over ~28-byte elements, run every frame, sitting under that notify. So the
-shape is entities -> animation layers -> per-layer transform -> a per-frame
-sort, all scaling together. It is the engine's own work, not a translation
-artefact, and nothing in the chain is a leaf a host fastpath replaces cleanly
-the way libpng's unfilter or stb_vorbis's imdct did.
+    claimed                                    actual
+    0x0040a0d0 walks lists at +0x30/+0x50      ANM2::Render; tests bytes at +0x109/+0x70
+    0x0040a030 iterates function pointers      AnimationState::Render; iterates ANM2 LAYERS,
+                                               one static callee (0x00409120)
+    0x00409120 a generic per-entity notify     the per-layer sprite draw: saves the 5 GL
+                                               blend globals, builds a 112-byte vertex quad
+    0x00a671b0 a sort that recurses, /28, /36  the vertex-format packer. No self-call; 28 and
+                                               36 are element STRIDES (28 floats = 112 bytes)
+    127 direct callers                         127 call SITES, in 61 distinct functions
+    cost quadratic in room population          NOT quadratic -- see below
+
+There is no O(n^2) in this chain. `0x0080ea80` iterates the room's entity array
+(`[room+0x125c]`, count `[room+0x1264]`), then its grid; `0x00806c20` walks the
+two ANM2s on the entity; `0x0040a030` walks that animation's layers. **Every
+inner bound is an animation-layer count, never the entity count.** The cost is
+the sum over entities of their layer count times fixed per-layer work -- linear
+in sprites drawn, which is why bullet spam hurts: every tear is an entity with
+layers, and the frame is spent drawing them, not querying them.
+
+The chain is also not "update" at all. `0x009555c0` is the top-level **Render**
+(it pushes a render target and sets the Exposure/Gamma uniforms, then switches
+on game state; state 2 is the one call per frame to `0x006fbc10`), and
+`0x006fbc10` is the in-game render plus the bloom/contrast/pixelation passes.
+So the player's "5.57 s on enemy queries" is real time in a real hot chain, but
+the chain is the renderer.
+
+Two things under it are waste rather than work, and one is now gone:
+
+`0x00a14c00` is `SetShaderUniform(name, type, value)`, and it is called from the
+per-layer draw with `"ChampionColor"`. It finds the uniform by a **linear
+strcmp scan** of the table (`0x00a15040`, stride 0x18) and, when the value
+differs, allocates: `0x00a0f4e0 -> 0x00a648b0 -> malloc(size+4)`, `memcpy`,
+freed via `free(p-4)`. That is where the `guest_malloc` 1.8% / `guest_free`
+0.9% in the profile comes from -- a string-keyed lookup and a heap round trip,
+per layer, per entity, per frame. Still open.
+
+### 21.112 Round 90d: the quad constructor that built what it overwrote
+
+`0x00a10fa0` is the 112-byte vertex-quad copy constructor, 2.5% of a loaded
+frame. It initialises the whole quad -- eight dwords zeroed, four vec2 from
+`DAT_00c7b640`, then four calls to `0x00a0f550(0xffffffff)` writing five floats
+each -- and then copies 0x1c = 28 dwords over the top of it. 8 + 4*5 = 28: the
+copy covers every dword the prologue wrote. The prologue is dead, and
+`0x00a0f550` writes only through its own ECX, touching no global and no
+allocator, so dropping it changes nothing outside the object.
+
+So the function is a `memcpy` of 112 bytes, and `WRAP_PATCHES[0x00a10fa0]` makes
+it one (`ret 4`, and EAX = `this` on the way out -- an MSVC ctor). Checked the
+way the others were, not argued: `ISAAC_FASTPATH_VERIFY=1` byte-compared the
+112 bytes against the lifted body on the game's own data across **19,224 calls,
+0 mismatches**.
+
+    with the fastpath off   sub_00a10fa0__lifted  2.5% self, 569 ms / 624 frames
+    with it on              absent from the profile          ~0.9 ms/frame
+
+Measured honestly: `ISAAC_FASTPATH=0` turns off all twelve fastpaths at once
+(30.9 -> 36.9 ms/frame), so that 6 ms is the whole set. The isolated figure for
+this one is the 0.9 ms/frame its own samples account for.
 
 **The cheap levers were checked and are all already spent** -- recorded so the
 next attempt does not re-check them:

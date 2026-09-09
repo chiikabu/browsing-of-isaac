@@ -1424,3 +1424,29 @@ bad:
     }
     return 0;
 }
+
+/* ---- the vertex-quad copy constructor (0x00a10fa0) ---------------------
+ *
+ * Round 90d. The loaded-floor profile puts 2.2% of the frame in this, and all
+ * of it is thrown away. The body initialises the whole 112-byte quad -- eight
+ * dwords zeroed, then four vec2 from DAT_00c7b640, then four calls to
+ * 0x00a0f550(0xffffffff) writing five floats each -- and then copies 0x1c = 28
+ * dwords (112 bytes) from the source over the top of it. 8 + 4*5 = 28: the
+ * copy covers every dword the prologue wrote, so the prologue is dead.
+ *
+ * 0x00a0f550 writes only through its own ECX (five floats) and touches no
+ * global and no allocator, so dropping those calls changes nothing outside
+ * the object. What is left is the copy.
+ *
+ * ISAAC_FASTPATH_VERIFY=1 byte-compares the 112 bytes against the lifted body
+ * on the game's own data, which is how this is checked rather than argued.
+ */
+int isaac_fast_quad_copy_ok(uint32_t self_va, uint32_t src_va) {
+    if (!isaac_is_guest_va(self_va) || !isaac_is_guest_va(self_va + 111u)) return 0;
+    if (!isaac_is_guest_va(src_va) || !isaac_is_guest_va(src_va + 111u)) return 0;
+    return 1;
+}
+
+void isaac_fast_quad_copy(uint32_t self_va, uint32_t src_va) {
+    memcpy(isaac_g(self_va), isaac_g(src_va), 112u);
+}

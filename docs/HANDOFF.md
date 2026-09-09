@@ -215,9 +215,9 @@ REQUIRE emsdk on PATH:
   Also measured and closed: the renderer looks a shader up BY NAME per draw
   (`FUN_00a140c0("KAGE_IndexedTextureShader")`, string hash `00a159d0`, a
   std::map `lower_bound` at `00a12280`) — tempting, but the whole path is
-  ~2.5%; the branch is rarely taken. The mass is `sub_00a671b0` at **10% of
-  the frame**, which calls three game functions and itself, so it is game
-  logic reached through the renderer, not a replaceable leaf.
+  ~2.5%; the branch is rarely taken. `sub_00a671b0` (10% of the frame) is the
+  **vertex-format packer** — it does NOT recurse and the 28/36 are element
+  strides (28 floats = 112 bytes), not a sort's divisors (corrected §21.112).
   Link `-O3` (wasm-opt over the whole module, `ISAAC_LINK_O3=1`) was BUILT and
   MEASURED: no frame-time gain (35.5 ms vs -O2 runs of 36.2/34.8/40.5 — inside
   a 5.7 ms spread), module 188 KB smaller, link 19.4 min. **Rejected**; switch
@@ -225,9 +225,23 @@ REQUIRE emsdk on PATH:
   Cheap levers all checked and already spent (do not re-check): link is -O2,
   lifted TUs -O3, host TUs -O3+SIMD, GL attrib state redundancy-filtered,
   glReadPixels is 3 calls a run (not a stall), dispatch cache 2-way/99.85%.
-  The hottest leaf `sub_00a671b0` recurses and divides by 28/36 — a per-frame
-  sort under the notify. Safe route for the fix is an `ISAAC_FASTPATH_VERIFY=1`
-  wrapper, as rounds 49/50 used.
+  **Round 90d corrected the whole reading of this chain** (§21.112). It is the
+  RENDERER, not an update/notify: `009555c0` top-level Render → `006fbc10`
+  in-game render + post FX → `0080ea80` room render → `00806c20` per-entity →
+  `0040a0d0` ANM2::Render → `0040a030` AnimationState::Render (iterates
+  **layers**) → `00409120` per-layer sprite draw. **There is no O(n²)**: every
+  inner bound is an animation-layer count, never the entity count. Bullet spam
+  hurts because every tear is an entity with layers to draw.
+  **Landed:** `WRAP_PATCHES[0x00a10fa0]` — the 112-byte vertex-quad ctor built
+  the whole quad then copied 28 dwords over it (8 + 4×5 = 28, so the prologue
+  is dead). Now a `memcpy`; verified byte-equal across **19,224 calls, 0
+  mismatches**; **≈0.9 ms/frame**. (`ISAAC_FASTPATH=0` disables all twelve at
+  once, 30.9 → 36.9 ms/frame — do not read that 6 ms as one patch.)
+  **Next, still open:** `00a14c00` `SetShaderUniform(name,…)` is called per
+  layer with `"ChampionColor"`, finds the slot by a **linear strcmp scan**
+  (`00a15040`, stride 0x18) and on change does `malloc(size+4)`/`memcpy`/`free`
+  — that is the guest_malloc 1.8% + guest_free 0.9%. Cache the name→slot and
+  reuse the buffer when the size is unchanged.
   `profile_load.mjs` verifies its own setup: it failed twice first, once
   profiling Basement because `stage 8` had not taken, once with the console
   open at 34% of samples (Enter on the empty line closes it; grave REOPENS it).

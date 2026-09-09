@@ -398,6 +398,34 @@ PURGE_PATCHES: dict[str, tuple[int, int]] = {
 # so the equivalence is measured on the game's own data, not assumed.
 # Each entry: va -> wrapper body text; the wrapper owns the callee's ret.
 WRAP_PATCHES: dict[int, str] = {
+    # The vertex-quad copy constructor (round 90d): `this` in ecx, the source
+    # on the stack, `ret 4`, and EAX = this on the way out (MSVC ctor). 2.2% of
+    # a loaded frame's self time goes here and every byte of it is overwritten
+    # before the function returns -- see host_fastpath.c for why the prologue
+    # is dead. What is left is a 112-byte copy.
+    0x00a10fa0: """void sub_00a10fa0(CpuState *restrict s) {
+  /* LIFT-PATCH wrap 0x00a10fa0: host vertex-quad copy (host_fastpath.c) */
+  RECOMP_VA(0xa10fa0u);
+  uint32_t self = s->ECX, src = MEMR32(s->ESP + 4u);
+  int mode = isaac_fastpath_mode();
+  if (mode == 0 || !isaac_fast_quad_copy_ok(self, src)) { isaac_fastpath_count(0xa10fa0u, 1); sub_00a10fa0__lifted(s); return; }
+  if (mode == 2) {
+    uint8_t snap[112], host[112];
+    memcpy(snap, RECOMP_PTR(self), 112u);
+    isaac_fast_quad_copy(self, src);
+    memcpy(host, RECOMP_PTR(self), 112u);
+    memcpy(RECOMP_PTR(self), snap, 112u);
+    sub_00a10fa0__lifted(s);
+    if (!isaac_fast_verify_equal(host, self, 112u)) isaac_fastpath_mismatch("quad_copy", 112u, 0u);
+    isaac_fastpath_count(0xa10fa0u, 2);
+    return;
+  }
+  isaac_fast_quad_copy(self, src);
+  s->EAX = self;                 /* the ctor hands `this` back in EAX */
+  s->EIP = MEMR32(s->ESP);
+  s->ESP += 8u;                  /* ret 4: the return address and the argument */
+}
+""",
     # libvorbis mdct_bitreverse (round 90): init in ecx, x in edx, plain ret.
     # Every cutscene with a Vorbis audio track trapped inside this with
     # "memory access out of bounds" -- the ONE ending video with no audio is
