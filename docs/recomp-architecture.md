@@ -7944,8 +7944,23 @@ and that function calls three *game* functions (`0x00415bc0`, `0x0041fba0`,
 `0x00589e40`) and itself -- game logic reached through the renderer, not a pure
 leaf that a host implementation can stand in for.
 
+The last untried lever was the link itself: the `--fast` profile already builds
+lifted TUs at `-O3` and host TUs at `-O3 -msimd128`, but wasm-opt runs at `-O2`.
+`ISAAC_LINK_O3=1` builds it at `-O3` instead. Measured, same server, same
+configs, rather than assumed:
+
+    link -O2   empty 16.8 ms   loaded 36.2 / 34.8 / 40.5 ms
+    link -O3   empty 16.9 ms   loaded 35.5 ms
+    module     51,691,522 -> 51,498,765 bytes  (-188 KB, 0.4%)
+
+The loaded runs spread 5.7 ms between themselves, so the 0.7 ms the `-O3` run
+came in under is inside the noise and not a result. What IS deterministic is the
+smaller module -- and 0.4% does not pay for a **19.4-minute** link on every
+build from here on. Rejected, and the switch left in place so nobody spends
+twenty minutes rediscovering it.
+
 So there is no safe micro-optimisation left to take: every candidate is either
-already done or measured and too small. What remains is structural -- what
+already done, measured and too small, or measured and rejected. What remains is structural -- what
 those 127 sites notify, and whether the walk can be hoisted or the callbacks
 filtered before dispatch. The safe route is a `ISAAC_FASTPATH_VERIFY=1` wrapper
 -- host and lifted both run and the touched range is byte-compared on the game's

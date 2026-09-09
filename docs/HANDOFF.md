@@ -218,6 +218,10 @@ REQUIRE emsdk on PATH:
   ~2.5%; the branch is rarely taken. The mass is `sub_00a671b0` at **10% of
   the frame**, which calls three game functions and itself, so it is game
   logic reached through the renderer, not a replaceable leaf.
+  Link `-O3` (wasm-opt over the whole module, `ISAAC_LINK_O3=1`) was BUILT and
+  MEASURED: no frame-time gain (35.5 ms vs -O2 runs of 36.2/34.8/40.5 — inside
+  a 5.7 ms spread), module 188 KB smaller, link 19.4 min. **Rejected**; switch
+  left in place so nobody spends twenty minutes rediscovering it.
   Cheap levers all checked and already spent (do not re-check): link is -O2,
   lifted TUs -O3, host TUs -O3+SIMD, GL attrib state redundancy-filtered,
   glReadPixels is 3 calls a run (not a stall), dispatch cache 2-way/99.85%.

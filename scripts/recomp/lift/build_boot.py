@@ -233,6 +233,11 @@ def main():
                     "-sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAP32,FS,ENV",
                     "-sMAX_WEBGL_VERSION=2", "-sMIN_WEBGL_VERSION=2",
                     "-sGL_ENABLE_GET_PROC_ADDRESS=0", "-lGL"]
+    if os.environ.get('ISAAC_LINK_O3') == '1':
+        # experiment: wasm-opt -O3 over the whole module instead of -O2.
+        # Semantics-preserving, so the only question is whether it pays for
+        # the extra link time and any size growth -- both measured.
+        LDFLAGS = ['-O3' if f == '-O2' else f for f in LDFLAGS]
     if args.fast:
         # --web --fast is a browser module built with the speed profile: the
         # web flags above stay, only the lifted objects and the output
