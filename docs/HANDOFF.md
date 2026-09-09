@@ -246,6 +246,20 @@ REQUIRE emsdk on PATH:
   `00a671b0` packer 189→709 ms, `007706e0` item-ownership query 220→466 ms,
   `recomp_call_indirect` 462→791 ms, `00409120` sprite draw →332 ms. Do NOT
   chase "enemy queries" — the closest thing is `007706e0`, an item query.
+  **Item Info (the descriptions unlocked after Mom) is gated by an option.**
+  `ItemInfoDisplayEnabled=1` in `options.ini` — the minimal console-only
+  options.ini the drivers seed does NOT set it, so the box can never render and
+  hours went into walking onto pedestals that were never going to show one.
+  Use `.scratch/opts-iteminfo.ini`. The unlock itself is achievement **641
+  "Item Info"** (`Achievement_ItemDescriptions.png`) and the text comes from
+  `info_display.xml`, **not** the pickup banner: 1,063 of its 3,631 lines carry
+  inline `<color=0xAARRGGBB>` markup and some carry `<collectible=NNN>` icons.
+  Reported symptom is "readable but aligned weird sometimes", which fits the
+  width measurement counting the tag characters the renderer strips — only the
+  29% of lines with a tag would be off-centre. Still unreproduced: the box
+  needs standing on a pedestal you cannot take, and shop rolls kept giving
+  consumables (a spawned collectible in a shop is free, so it is taken on
+  touch).
   **Checked in 90d and NOT worth doing (do not re-check):** `007706e0` is
   `Player::HasCollectible` — a conditional cascade that calls a dozen game
   functions and **recurses into itself**; a host mirror is out of the question
