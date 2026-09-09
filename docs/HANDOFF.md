@@ -191,6 +191,17 @@ REQUIRE emsdk on PATH:
   in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
   2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
   options, 16 mods, 19 online.
+- **Round 90c: the item descriptions are not broken, checked exhaustively**.
+  A reported "internal item descriptions display buggy" could not be
+  reproduced on any surface: pickup banners for literal AND `#KEY`-resolved
+  items, achievement 641 "Item Info" unlocked, shop pedestals, this port's own
+  mods menu. `check_strings.mjs` settles the data side rather than sampling:
+  **2,063 of 2,067 name/description keys resolve**. The four that do not are
+  `#PILLS_HERE_*` (43) and `#TAROT_CARD_*` (61) — removed items, absent from
+  the ORIGINAL extraction too, and the game refuses to spawn them (`spawn
+  5.100.61` hands back Glass Cannon). Every obtainable item resolves. If the
+  report is real it is a rendering surface not yet identified — get a
+  screenshot before hunting again.
 - **Round 90b: where the frame time goes when the room fills up** (§21.112).
   Womb at cpu x4: **16.8 ms/frame empty -> 19.2 with 8 items/10 enemies -> 33.6
   with 24/26** (59 -> 30 fps). Superlinear: the first ten enemies cost 2.4 ms,
