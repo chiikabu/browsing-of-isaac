@@ -7903,12 +7903,35 @@ function pointers and calls each; `0x00409120` is 447 instructions with a
 engine's generic per-entity notify, and with n entities each notifying over
 lists that grow with n, the cost is quadratic in the room's population.
 
-Not yet optimised, and worth saying why: the lifted bodies here look faithful,
-the prologue is the ordinary one, and nothing in the chain is a leaf that a host
-fastpath replaces cleanly the way libpng's unfilter or stb_vorbis's imdct did.
-The next move is to find what the 127 call sites are notifying and whether the
-list walk can be hoisted or the callbacks filtered before dispatch, which is a
-change to the engine's own structure rather than a translation fix.
+Not yet optimised, and worth saying why. `sub_00a671b0`, the hottest single leaf
+(4.5% self), recurses and divides pointer differences by 28 and 36 -- it is a
+sort over ~28-byte elements, run every frame, sitting under that notify. So the
+shape is entities -> animation layers -> per-layer transform -> a per-frame
+sort, all scaling together. It is the engine's own work, not a translation
+artefact, and nothing in the chain is a leaf a host fastpath replaces cleanly
+the way libpng's unfilter or stb_vorbis's imdct did.
+
+**The cheap levers were checked and are all already spent** -- recorded so the
+next attempt does not re-check them:
+
+    link                already -O2 (build_boot.json fastLink:false); --fast is
+                        the speed PROFILE, not a fast link
+    lifted TUs          already -O3 (round 49)
+    host TUs            already -O3 + wasm SIMD (rounds 58, 61)
+    GL attrib state     already redundancy-filtered, with a gls_skip_attrib
+                        counter (host_gl_webgl.c); the calls that reach WebGL
+                        are genuine format changes
+    glReadPixels        3 calls in a whole run, not per frame -- the 1x1
+                        readback is not a pipeline stall here
+    dispatch cache      already 2-way, 16K sets, 99.85% hit (round 38); the
+                        5.1% in recomp_call_indirect is the lookup and the
+                        indirect call themselves
+
+What is left is structural: what those 127 sites notify, and whether the walk
+can be hoisted or the callbacks filtered before dispatch. The safe route is a
+`ISAAC_FASTPATH_VERIFY=1` wrapper -- host and lifted both run and the touched
+range is byte-compared on the game's own data -- which is how rounds 49 and 50
+landed theirs. That is a piece of work, not a patch.
 
 ### 21.111 Round 90: no ending video had ever played, and the module was stale
 

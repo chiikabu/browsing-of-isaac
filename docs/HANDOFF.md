@@ -201,6 +201,12 @@ REQUIRE emsdk on PATH:
   pointers). That is the same 5 s a player reported as "enemy queries". NOT yet
   optimised — no clean leaf to host-fastpath; the next move is what the 127
   sites notify and whether the walk can be hoisted or filtered before dispatch.
+  Cheap levers all checked and already spent (do not re-check): link is -O2,
+  lifted TUs -O3, host TUs -O3+SIMD, GL attrib state redundancy-filtered,
+  glReadPixels is 3 calls a run (not a stall), dispatch cache 2-way/99.85%.
+  The hottest leaf `sub_00a671b0` recurses and divides by 28/36 — a per-frame
+  sort under the notify. Safe route for the fix is an `ISAAC_FASTPATH_VERIFY=1`
+  wrapper, as rounds 49/50 used.
   `profile_load.mjs` verifies its own setup: it failed twice first, once
   profiling Basement because `stage 8` had not taken, once with the console
   open at 34% of samples (Enter on the empty line closes it; grave REOPENS it).
