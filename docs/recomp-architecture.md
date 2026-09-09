@@ -7958,6 +7958,41 @@ Measured honestly: `ISAAC_FASTPATH=0` turns off all twelve fastpaths at once
 (30.9 -> 36.9 ms/frame), so that 6 ms is the whole set. The isolated figure for
 this one is the 0.9 ms/frame its own samples account for.
 
+**What the frame actually scales with.** The report was "fps dies with more
+items and floors, especially heavy bullet spam", and that is worth measuring
+rather than assuming. Four runs on the same Womb floor, same throttle, varying
+only the population:
+
+    items   enemies   ms/frame   idle
+        0         0       16.8   36.8%
+        0        18       17.9    3.9%   <- +1.1 ms for eighteen enemies
+       16         0       30.6    3.0%   <- +13.8 ms for sixteen items
+       16        18       33.4    2.6%
+
+**Items cost about twelve times what enemies do.** Eighteen enemies are almost
+free; sixteen items nearly double the frame. The player's reading was right and
+the "enemy queries" framing was not -- and the mechanism is visible in the
+profile, because the items that were given are tear multipliers. Where the time
+went, absolute, between the first and third rows:
+
+    sub_00a671b0  vertex-format packer     189 -> 709 ms   (x3.8)
+    sub_007706e0  item-ownership query     220 -> 466 ms   (x2.1)
+    recomp_call_indirect                   462 -> 791 ms
+    sub_00409120  per-layer sprite draw      -    332 ms
+
+So more items means more tears, more tears means more entities, and every
+entity is a pile of animation layers packed into vertex quads. The renderer is
+not doing anything quadratic; there is simply far more to draw. The one thing
+here that is *not* drawing is `sub_007706e0`, a per-collectible-ID ownership
+cascade that doubles with the item count -- a genuine item query, and the
+closest thing in this profile to what the report called an enemy query.
+
+Next, in order of measured size: `sub_00a671b0` (the packer, biggest single
+leaf and the one that grows most) -- but note it is not a leaf a host mirror
+replaces cleanly, since it calls into ten other functions including the quad
+constructor above; then `sub_007706e0`; then `SetShaderUniform`'s name scan and
+its malloc/memcpy/free per changed value.
+
 **The cheap levers were checked and are all already spent** -- recorded so the
 next attempt does not re-check them:
 

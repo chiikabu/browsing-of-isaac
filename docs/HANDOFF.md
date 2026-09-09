@@ -237,6 +237,15 @@ REQUIRE emsdk on PATH:
   is dead). Now a `memcpy`; verified byte-equal across **19,224 calls, 0
   mismatches**; **≈0.9 ms/frame**. (`ISAAC_FASTPATH=0` disables all twelve at
   once, 30.9 → 36.9 ms/frame — do not read that 6 ms as one patch.)
+  **What the frame scales with** (measured, same floor and throttle, only the
+  population varying): `0 items/0 enemies` **16.8 ms** (36.8% idle) →
+  `0/18` **17.9 ms** → `16/0` **30.6 ms** (3.0% idle) → `16/18` **33.4 ms**.
+  **Items cost ~12× what enemies do**; eighteen enemies are nearly free. The
+  items given are tear multipliers, so more items → more tears → more entities
+  → more animation layers → more vertex quads. Growth between 0 and 16 items:
+  `00a671b0` packer 189→709 ms, `007706e0` item-ownership query 220→466 ms,
+  `recomp_call_indirect` 462→791 ms, `00409120` sprite draw →332 ms. Do NOT
+  chase "enemy queries" — the closest thing is `007706e0`, an item query.
   **Next, still open:** `00a14c00` `SetShaderUniform(name,…)` is called per
   layer with `"ChampionColor"`, finds the slot by a **linear strcmp scan**
   (`00a15040`, stride 0x18) and on change does `malloc(size+4)`/`memcpy`/`free`
