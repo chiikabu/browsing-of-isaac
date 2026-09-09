@@ -246,6 +246,14 @@ REQUIRE emsdk on PATH:
   `00a671b0` packer 189→709 ms, `007706e0` item-ownership query 220→466 ms,
   `recomp_call_indirect` 462→791 ms, `00409120` sprite draw →332 ms. Do NOT
   chase "enemy queries" — the closest thing is `007706e0`, an item query.
+  **Checked in 90d and NOT worth doing (do not re-check):** `007706e0` is
+  `Player::HasCollectible` — a conditional cascade that calls a dozen game
+  functions and **recurses into itself**; a host mirror is out of the question
+  and caching it per frame changes semantics. `00a15040` (the uniform name
+  scan) never reaches the top-30 self list, so fastpathing it buys nothing.
+  `readPixels` shows in the V8 profile at ~1.5% but **`glReadPixels` does not
+  appear once in a 600-frame run** — that sample is the driver's own
+  frame-detection readback, not the game (the "3 calls a run" note stands).
   **Next, still open:** `00a14c00` `SetShaderUniform(name,…)` is called per
   layer with `"ChampionColor"`, finds the slot by a **linear strcmp scan**
   (`00a15040`, stride 0x18) and on change does `malloc(size+4)`/`memcpy`/`free`
