@@ -7864,6 +7864,52 @@ stays as a rebuilt 19 MB array, so a session that sees the whole payload holds
 -- the background prefetch does not make it worse, it just makes it easier to
 reach.
 
+### 21.112 Round 90b: where the frame time goes when the room fills up
+
+The complaint is that the frame rate dies with more items and floors, and worst
+under heavy shot spam. `profile_load.mjs` measures that instead of an empty
+starting room: it sets a floor, a pile of items and a room of enemies through
+the game's own console, then samples while walking and firing. Two things had
+to be fixed before any number it produced meant anything -- `stage 8` silently
+not taking (it profiled Basement I), and the debug console being left open,
+which put `Console::Update` at **34% of the samples**, because the console
+redraws its backlog every frame through the guest's `vsnprintf`. Closing it is
+Enter on the empty line; tapping the grave key after that *reopens* it, which is
+what the first two runs did. The driver now checks the floor took and refuses to
+report a profile with the console in it.
+
+Womb, Chromebook-class throttle (cpu x4):
+
+     0 items,  0 enemies    16.8 ms/frame    59 fps
+     8 items, 10 enemies    19.2 ms/frame    52 fps
+    24 items, 26 enemies    33.6 ms/frame    30 fps
+
+Superlinear, and not evenly: the first ten enemies cost 2.4 ms, the next sixteen
+cost 14.4. Comparing the two profiles function by function says exactly where
+that goes. Against an update root that grows 2.0x and most of the tree 1.1-2.0x:
+
+    sub_0040a0d0      0 -> 5,032 ms     (absent from an empty room entirely)
+    sub_0040a030    596 -> 5,206 ms     8.7x
+    sub_00409120    596 -> 5,054 ms     8.5x
+    sub_00806c20      0 -> 3,595 ms
+    sub_0080ea80  1,038 -> 5,070 ms     4.9x
+
+That chain is the whole superlinearity, and it is the one a player already
+reported as "5.57 s on enemy queries" -- the same 5 s, found independently.
+`0x0040a0d0` has **127 direct callers**, tests two byte flags on its object and
+walks two lists at +0x30 and +0x50; `0x0040a030` iterates a counted array of
+function pointers and calls each; `0x00409120` is 447 instructions with a
+488-byte frame and SEH, and it is what the per-element calls land in. It is the
+engine's generic per-entity notify, and with n entities each notifying over
+lists that grow with n, the cost is quadratic in the room's population.
+
+Not yet optimised, and worth saying why: the lifted bodies here look faithful,
+the prologue is the ordinary one, and nothing in the chain is a leaf that a host
+fastpath replaces cleanly the way libpng's unfilter or stb_vorbis's imdct did.
+The next move is to find what the 127 call sites are notifying and whether the
+list walk can be hoisted or the callbacks filtered before dispatch, which is a
+change to the engine's own structure rather than a translation fix.
+
 ### 21.111 Round 90: no ending video had ever played, and the module was stale
 
 A player reported `TRAP in main @ 0x00931050: memory access out of bounds`

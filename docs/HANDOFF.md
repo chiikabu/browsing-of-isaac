@@ -191,6 +191,19 @@ REQUIRE emsdk on PATH:
   in the instruction before `call MenuManager::Init`): -1 the intro, 1 title,
   2 file select, **3 the menu paper**, 5 a run, 7 challenges, 9 stats, 10
   options, 16 mods, 19 online.
+- **Round 90b: where the frame time goes when the room fills up** (§21.112).
+  Womb at cpu x4: **16.8 ms/frame empty -> 19.2 with 8 items/10 enemies -> 33.6
+  with 24/26** (59 -> 30 fps). Superlinear: the first ten enemies cost 2.4 ms,
+  the next sixteen cost 14.4. Function-by-function against an update root that
+  grows 2.0x: **`sub_0040a0d0` 0 -> 5,032 ms, `sub_0040a030` 8.7x,
+  `sub_00409120` 8.5x** — the engine's per-entity notify (0040a0d0 has **127
+  direct callers**, walks two lists; 0040a030 calls a counted array of function
+  pointers). That is the same 5 s a player reported as "enemy queries". NOT yet
+  optimised — no clean leaf to host-fastpath; the next move is what the 127
+  sites notify and whether the walk can be hoisted or filtered before dispatch.
+  `profile_load.mjs` verifies its own setup: it failed twice first, once
+  profiling Basement because `stage 8` had not taken, once with the console
+  open at 34% of samples (Enter on the empty line closes it; grave REOPENS it).
 - **Round 90: no ending video had ever played, and the module was stale**
   (§21.111). Reported as a trap in the Womb/Eden ending; the census says
   **cutscenes 4-10 all trap** and only 1, 2, 3 pass — 1 and 2 have no video,

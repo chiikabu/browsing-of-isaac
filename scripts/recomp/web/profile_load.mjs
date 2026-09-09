@@ -67,8 +67,8 @@ try {
   let enters = 0;
   for (;;) {
     if (await logMatch(/Level::Init m_Stage|RNG Start Seed/)) break;
-    if (enters >= 10) throw new Error('no run after 10 Enters');
-    await hold('Enter'); enters += 1; await sleep(1500);
+    if (enters >= 30) throw new Error('no run after 30 attempts');
+    await hold('Enter'); await sleep(500); await hold('Space'); enters += 1; await sleep(2000);
   }
   await sleep(2500);
 

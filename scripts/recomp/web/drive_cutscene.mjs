@@ -60,11 +60,13 @@ try {
 
   await page.goto(URL);
   await until(async () => (await state()).f > 0, 900000, 'first frame');
+  // patient enough for a real host: the first frame arrives long before the
+  // menus are responsive when the payload is still streaming in
   let enters = 0;
   for (;;) {
     if (await logMatch(/Level::Init m_Stage|RNG Start Seed/)) break;
-    if (enters >= 10) throw new Error('no run after 10 Enters');
-    await hold('Enter'); enters += 1; await sleep(1500);
+    if (enters >= 40) throw new Error('no run after 40 Enters');
+    await hold('Enter'); await sleep(500); await hold('Space'); enters += 1; await sleep(2000);
   }
   await sleep(2500);
   check(!!(await logMatch(/Level::Init m_Stage/)), 'a run started');
