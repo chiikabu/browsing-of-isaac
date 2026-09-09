@@ -212,6 +212,12 @@ REQUIRE emsdk on PATH:
   pointers). That is the same 5 s a player reported as "enemy queries". NOT yet
   optimised — no clean leaf to host-fastpath; the next move is what the 127
   sites notify and whether the walk can be hoisted or filtered before dispatch.
+  Also measured and closed: the renderer looks a shader up BY NAME per draw
+  (`FUN_00a140c0("KAGE_IndexedTextureShader")`, string hash `00a159d0`, a
+  std::map `lower_bound` at `00a12280`) — tempting, but the whole path is
+  ~2.5%; the branch is rarely taken. The mass is `sub_00a671b0` at **10% of
+  the frame**, which calls three game functions and itself, so it is game
+  logic reached through the renderer, not a replaceable leaf.
   Cheap levers all checked and already spent (do not re-check): link is -O2,
   lifted TUs -O3, host TUs -O3+SIMD, GL attrib state redundancy-filtered,
   glReadPixels is 3 calls a run (not a stall), dispatch cache 2-way/99.85%.

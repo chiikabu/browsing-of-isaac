@@ -7927,11 +7927,31 @@ next attempt does not re-check them:
                         5.1% in recomp_call_indirect is the lookup and the
                         indirect call themselves
 
-What is left is structural: what those 127 sites notify, and whether the walk
-can be hoisted or the callbacks filtered before dispatch. The safe route is a
-`ISAAC_FASTPATH_VERIFY=1` wrapper -- host and lifted both run and the touched
-range is byte-compared on the game's own data -- which is how rounds 49 and 50
-landed theirs. That is a piece of work, not a patch.
+Two more hypotheses were measured and closed, both plausible enough to be worth
+the reader's time. `sub_00a129a0` reaches `FUN_00a140c0("KAGE_IndexedTextureShader")`
+-- a shader looked up **by name**, per draw, through a string hash
+(`0x00a159d0`) and a `std::map` walk (`0x00a12280` is a textbook MSVC red-black
+`lower_bound`: `_Isnil` at +0xd, key at +0x10). Looking a shader up by string
+every draw is exactly the kind of waste a memo removes. It is not the cost:
+
+    sub_00a129a0  12.5%    sub_00a128f0  12.3%    sub_00a671b0  10.0%
+    sub_00a14c00   2.9%    sub_00a13750   2.0%    sub_00a159d0   0.5%
+    sub_00a12280   0.5%    sub_00a140c0   0.0%
+
+The whole string-hash-and-lookup path is ~2.5%, because the shader branch is
+the one `cVar3` rarely takes. The mass is `sub_00a671b0` at 10% of the frame,
+and that function calls three *game* functions (`0x00415bc0`, `0x0041fba0`,
+`0x00589e40`) and itself -- game logic reached through the renderer, not a pure
+leaf that a host implementation can stand in for.
+
+So there is no safe micro-optimisation left to take: every candidate is either
+already done or measured and too small. What remains is structural -- what
+those 127 sites notify, and whether the walk can be hoisted or the callbacks
+filtered before dispatch. The safe route is a `ISAAC_FASTPATH_VERIFY=1` wrapper
+-- host and lifted both run and the touched range is byte-compared on the game's
+own data -- which is how rounds 49 and 50 landed theirs. That is a piece of
+work, not a patch, and it should be started from these numbers rather than from
+a fresh profile.
 
 ### 21.111 Round 90: no ending video had ever played, and the module was stale
 
