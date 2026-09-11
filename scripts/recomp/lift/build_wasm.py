@@ -17,7 +17,7 @@ import time
 
 import psutil
 
-EMCC = os.environ.get("EMCC", r"C:\Users\Luca\emsdk\upstream\emscripten\emcc")
+EMCC = os.environ.get("EMCC", os.path.join(os.path.expanduser("~"), "emsdk", "upstream", "emscripten", "emcc"))
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 

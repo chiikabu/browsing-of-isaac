@@ -5105,7 +5105,7 @@ adoption of the page-made object.
 ## Appendix: reproduction
 
 ```bash
-PY=C:/Users/Luca/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe
+PY=python                           # any Python 3 environment you can pip-install into
 $PY -m pip install pypcode          # 3.3.3, vendors Ghidra SLEIGH
 
 # function starts (9.6 s)
@@ -7933,7 +7933,17 @@ strcmp scan** of the table (`0x00a15040`, stride 0x18) and, when the value
 differs, allocates: `0x00a0f4e0 -> 0x00a648b0 -> malloc(size+4)`, `memcpy`,
 freed via `free(p-4)`. That is where the `guest_malloc` 1.8% / `guest_free`
 0.9% in the profile comes from -- a string-keyed lookup and a heap round trip,
-per layer, per entity, per frame. Still open.
+per layer, per entity, per frame.
+
+**Corrected in round 90e, and closed.** It is not a replace. On a changed
+value the function appends the new buffer to that uniform's own vector of
+versions (entry `+0xc..+0x14`, grown through `0x0042c920` when full) and then
+rebuilds the per-uniform latest-version index list at `this+0x40`; draws
+recorded before the change refer to the older versions by index. There is no
+buffer to reuse -- reusing one would change what already-recorded draws see --
+and where the versions are freed was not traced, so the malloc/free share above
+is an attribution, not a measurement. What is left is the name scan, which
+never reaches the top-30.
 
 ### 21.112 Round 90d: the quad constructor that built what it overwrote
 
@@ -8023,8 +8033,10 @@ every draw is exactly the kind of waste a memo removes. It is not the cost:
 The whole string-hash-and-lookup path is ~2.5%, because the shader branch is
 the one `cVar3` rarely takes. The mass is `sub_00a671b0` at 10% of the frame,
 and that function calls three *game* functions (`0x00415bc0`, `0x0041fba0`,
-`0x00589e40`) and itself -- game logic reached through the renderer, not a pure
-leaf that a host implementation can stand in for.
+`0x00589e40`) among its 13 direct callees -- game logic reached through the
+renderer, not a pure leaf that a host implementation can stand in for. (This
+said "and itself" until round 90e; the lifted body has no call to itself, as
+the table above already says.)
 
 The last untried lever was the link itself: the `--fast` profile already builds
 lifted TUs at `-O3` and host TUs at `-O3 -msimd128`, but wasm-opt runs at `-O2`.
@@ -8220,7 +8232,7 @@ code has ~20 readers and a real writer, `__isa_available_init`, which sets
 that dispatches on it, some possibly into SSE4.2 string instructions this
 lifter does not emulate. The fix is the routine instead:
 `WRAP_PATCHES[0x00af0800]` computes `fisttp`'s result directly from ST0
-(`isaac_x87_trunc_i64`, built from the bit fields because wasm's own float->int
+(`isaac_fast_x87_trunc_i64`, built from the bit fields because wasm's own float->int
 truncation traps out of range), writes EDX:EAX, leaves ECX at the entry ESP as
 the fast path does, and pops the stack the way the lifted `fisttp` does. It has
 two callers: the panel layout, and `0x00acc8f0`, reached only through a stored
@@ -8236,3 +8248,122 @@ The A/B is one build: the same module under `?ISAAC_FASTPATH=0` draws the
 The helper was checked against `fisttp` on 24 values before building,
 including the out-of-range and NaN edges (integer indefinite,
 0x8000000000000000).
+
+### 21.114 Round 90f: the page had lost its boot trail
+
+Found while checking round 90e on the live page: the first frame came at
+105.6 s and the title at **337.4 s** -- nearly four minutes of dead canvas
+between them, where a local run takes about three seconds. The log stopped
+right after the shader setup (`HQ4X size: 480x270`); the line that follows it
+within a second locally did not come for minutes.
+
+**The cause: no boot trail since round 90.** The chunked page prefetches,
+before the engine starts, only the chunks the boot trail names -- the reads a
+recorded boot made -- and streams the rest in behind the game (rounds 89d and
+89f). `ship.py` puts the trail into the dist only when it is given `--trail`,
+and every build from round 90 on ran `ship.py build` without it. Nothing said
+so: `portable.py` printed "the modules and the boot trail are in it" whether or
+not the trail was. The built pages of 89d to 89i carry a `"trail"`; r90, r90d
+and r90e -- the one deployed -- do not. Without one, `prefetchAll()` falls back
+to fetching every chunk before the first frame: the whole 543 MB, through a
+cache sized for the steady state.
+
+**Three loader flaws, found on the way.** Each is wrong; none of them turned
+out to matter in the runs below.
+
+1. **The oldest entries are the ones nothing has read yet.** The cache is an
+   LRU on a `Map`: the prefetch inserts in order, a read moves its chunk to the
+   young end, and `trim()` evicted the oldest key -- which is always a
+   prefetched chunk nothing has read, the next one the boot will ask for.
+   (Round 89f's comment said eviction "lands on dead weight". It lands on the
+   next read.) Each re-fetch inserted a chunk, which evicted the one after it.
+2. **The budget dropped at the first frame.** Round 89f cut the cache to its
+   steady 256 MB "once a frame exists". The trail holds the reads up to frame
+   300, and `boot_web.mjs` itself calls the boot over at frame 600
+   (`READER_CLEAR_FRAME`); at frame 1 the boot is still reading.
+3. **The boot budget undercounted part A.** It summed `S[].size` over the head,
+   which is the stored size, and part A is stored gzipped: what it inflates to
+   overran the budget during the prefetch itself.
+
+With no trail the budget never leaves 256 MB, and during the prefetch nothing
+has been read yet, so either loader evicts the oldest chunk: part A, before the
+module is read out of it (a0-a3 were each fetched twice, the second time just
+before the first frame), and after it the trail chunks go again one by one.
+
+Measured on local twins of each page under a throttled link
+(`scripts/recomp/web/throttle_boot.mjs`: CDP network emulation at 25 Mbit/s and
+60 ms, `?noranges=1` for the CDN's whole-chunk path), counting every chunk GET
+at the network layer:
+
+    page                             first frame  title    stalled  GETs       over the wire
+    r90e as deployed (no trail)      196.6 s      440.9 s  ~111 s   52 for 32  862 MB
+    no trail, 90f loader             196.1 s      433.6 s  ~105 s   51 for 32  844 MB
+    89i (trail, 89f loader)          102.7 s      256.4 s   ~20 s   33 for 32  560 MB
+    r90g (trail, 90f loader)         102.6 s      256.3 s   ~19 s   33 for 32  560 MB
+
+"Title" includes the intro, which runs about 8,000 frames (~133 s) whatever
+the link does -- the driver presses nothing -- so "stalled" is the part the
+loader decides: the wall time between the first frame and the title that was
+not spent presenting frames (at 60 fps). The payload is 543 MB. Unthrottled,
+the same page reads ~21 s: intro frames the engine does not present at 60 fps,
+a floor no loader moves. So with the trail a 25 Mbit/s first visit stalls no
+more after its first frame than a local one does.
+
+**The trail is the whole of the improvement.** The second row shows the
+loader corrections alone do nothing for a page that must fetch everything
+through a 256 MB cache, and the last two show they do nothing measurable with
+the trail either: the 89f loader and the 90f one make the same 33 GETs in the
+same time, and both fetch one chunk twice -- b19, which the trail names, which
+arrives early, is still unread when the budget drops, and is read again at the
+title. The corrections are kept because they are right and tested, not because
+they are faster. What would save that one re-fetch is a leftover stream that
+never makes room by evicting a chunk nobody has read; that is the next thing to
+measure. The JS heap peaks at 441 MB at the first frame with either loader
+(360 MB of it the head) and settles at 256-340 MB.
+
+**The fixes.** `scripts/recomp/assets/boot-trail.json` is the trail this
+payload's archive layout was recorded with (round 89's run; part B is
+byte-identical to 89i's, so it still applies), and `ship.py` ships it by
+default -- a missing trail file is an error, and `--no-trail` is the only way
+to build without one. `portable.py chunks` refuses a dist with no
+`boot-trail.json` unless given `--no-trail`, and its summary says whether the
+page has a trail and how many reads it holds. In the loader: `trim()` evicts
+the oldest chunk a read has taken (`readOnce`), and an unread one only when
+nothing read is left; a prefetch never counts as a read (`piece(..., 1)` for the
+head, `2` for the paced stream, and only the stream counts toward its own
+pacing); the boot runs uncapped (`CACHE_MAX = Infinity` -- the head IS its
+working set); and the steady budget and the leftover stream both wait for
+`BOOT_OVER_FRAME = 600`, whether or not anything is left to stream.
+
+**A second cost, to returning visitors.** Since 89c the page is pinned to the
+payload commit with one base for every chunk, so each deploy moved all 32 URLs
+and a returning visitor re-fetched 512 MB of part B their cache already held.
+Part B has not changed since `79d199a` (round 89b). A stream may now carry its
+own base (`--base-b`), and part B is pinned to the commit that last changed it:
+a deploy that touches only the module costs a returning visitor ~40 MB.
+`check_deployed.mjs` asks for each chunk where the page will.
+
+`tests/recomp-portable.test.js` runs the loader's own cache code rather than
+matching its text (the head inserted in trail order, the first three read, the
+budget cut to three: the three unread survive, where the old code kept the
+other three), and pins the trail guard, the committed trail's shape and the
+per-stream base; `tests/recomp-ship.test.js` expects the trail in a dist.
+
+**Also this round, from running the unit suite:** three wrappers broke the
+pinned WRAP_PATCHES contract (`tests/recomp-fastpath.test.js`), one each from
+rounds 90, 90d and 90e, and the suite would have said so in each of them. The
+90d quad copy spelled its `ret 4` as `ESP += 8u` where the contract spells a
+purge `4u + Nu` (the same code). The round-90 vorbis guard called a host
+function outside the `isaac_fast_` family, never consulted the mode, and ended
+in the lifted call; it now runs the lifted body unguarded under
+`ISAAC_FASTPATH=0`, as every wrapper does. Round 90e's float->int64 had neither
+a verify path nor the pinned ending. Two of these cannot verify honestly -- one
+because the lifted body is the defect, one because a guard has no host result
+-- so the test takes a `NO_VERIFY` table naming each with its reason, and the
+wrapper must say so in its own body. The suite is 259/259.
+
+The lesson is round 86c's again, one layer down: a build that silently leaves
+out an input produces a page that works, only slowly, and nothing about a
+working page says what it is missing. A run against the real transport --
+throttled, counting GETs -- found in minutes what four rounds of local testing
+could not show, because against a local server a re-fetch costs nothing.

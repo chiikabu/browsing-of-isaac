@@ -272,8 +272,10 @@ test('the bundle rules keep exactly the archive set the drivers register', () =>
 
 test('both runners can be pointed at another instance dir, and the web runner records what it served', () => {
   const drv = readFileSync(join(root, 'scripts', 'recomp', 'lift', 'boot_integration.mjs'), 'utf8');
-  assert.match(drv, /const INSTANCE_DIR = \(process\.env\.ISAAC_INSTANCE_DIR \|\| 'C:\/Users\/Luca\/Desktop\/isaac\/\.scratch\/game-instance'\)/,
-    'ISAAC_INSTANCE_DIR overrides the node driver, the default is unchanged');
+  assert.match(drv, /const INSTANCE_DIR = \(process\.env\.ISAAC_INSTANCE_DIR \|\| defaultInstanceDir\(\)\)/,
+    'ISAAC_INSTANCE_DIR overrides the node driver');
+  assert.ok(drv.includes("nodePath.join(d, '.scratch', 'game-instance')"),
+    "the default is the repo's own .scratch/game-instance, found from the file, not a machine path");
   assert.ok(drv.includes("walk(INSTANCE_DIR, '')") && drv.includes('openSync(`${INSTANCE_DIR}/${src}`'),
     'the tree walk and the windowed reads follow the override');
   const web = readFileSync(join(root, 'scripts', 'recomp', 'web', 'run_web.mjs'), 'utf8');

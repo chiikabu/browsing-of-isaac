@@ -143,12 +143,14 @@ test('ship.py build: the dist tree, the index shape, the siblings, the manifest 
     // the tree: the page, the module, the image, the bundle under instance/, the index, the manifest, the siblings
     const got = walk(dist).sort();
     const bundleFiles = walk(tree.bundle).map((p) => `instance/${p}`);
-    const expected = ['play.html', 'play.mjs', 'boot_web.mjs', 'menu_overlay.mjs', 'zip.mjs', 'mods.mjs', 'boot.mjs', 'boot.wasm', 'isaac.segs.bin', 'instance_index.json', 'dist.json', ...bundleFiles,
+    // round 90f: the recorded boot trail ships by default (--no-trail leaves it out)
+    const expected = ['play.html', 'play.mjs', 'boot_web.mjs', 'menu_overlay.mjs', 'zip.mjs', 'mods.mjs', 'boot.mjs', 'boot.wasm', 'isaac.segs.bin', 'boot-trail.json', 'instance_index.json', 'dist.json', ...bundleFiles,
       'boot.wasm.gz', 'instance/resources/packed/sfx.a.gz', ...(hasBr ? ['boot.wasm.br', 'instance/resources/packed/sfx.a.br'] : [])].sort();
     assert.deepEqual(got, expected);
     for (const f of ['play.html', 'play.mjs', 'boot_web.mjs', 'menu_overlay.mjs', 'zip.mjs', 'mods.mjs']) assert.ok(readFileSync(join(dist, f)).equals(readFileSync(join(web, f))), `${f} is the page's file`);
     assert.ok(readFileSync(join(dist, 'boot.wasm')).equals(tree.modFiles['boot.wasm']), 'the module is copied');
     assert.ok(readFileSync(join(dist, 'isaac.segs.bin')).equals(tree.segsBytes), 'the image is copied');
+    assert.ok(readFileSync(join(dist, 'boot-trail.json')).equals(readFileSync(join(web, '..', 'assets', 'boot-trail.json'))), 'the recorded trail is the one shipped');
     assert.ok(readFileSync(join(dist, 'instance', '.bundle.json')).equals(readFileSync(join(tree.bundle, '.bundle.json'))), 'the bundle manifest travels along');
     // the index: the shape boot_web.mjs consumes -- an array of {p, s}, the bundle's non-dot files with their sizes, sorted
     const index = JSON.parse(readFileSync(join(dist, 'instance_index.json'), 'utf8'));

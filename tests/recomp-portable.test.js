@@ -66,11 +66,14 @@ test('a window is a byte range inside a large chunk, and the payload is a dozen 
   // that only checks "206 and two bytes" passes. The page knows the chunk
   // length, so the probe requires Content-Range's total to match it.
   assert.match(portable, /async function probeRanges\(\) \{/);
-  assert.match(portable, /Range: 'bytes=0-63'/);
+  // round 89d: a kilobyte, then a second range overlapping it that must agree --
+  // jsDelivr's answers four bytes short passed a probe that asked only once
+  assert.match(portable, /Range: 'bytes=0-1023'/);
+  assert.match(portable, /Range: 'bytes=512-1535'/);
   // round 84: one question is a coin toss on a host whose answers vary, so the
   // probe asks about four chunks and every one has to come back right
   assert.match(portable, /var n = count\(b\), picks = \[0, Math\.floor\(n \/ 3\), Math\.floor\(\(2 \* n\) \/ 3\), n - 1\]/);
-  assert.match(portable, /if \(got !== 64 \|\| claimed !== want\) \{/);
+  assert.match(portable, /if \(head\.length !== 1024 \|\| claimed !== want\) \{/);
   assert.match(portable, /ranges = true;/);
   assert.match(portable, /"bytes": b_len/, 'the page carries the raw stream length so the probe has a number to check');
   assert.match(portable, /--part-mib/, 'a 1 MiB cut exists for a host whose ranges cannot be trusted');
@@ -243,8 +246,86 @@ test('round 77: both sides of the seam agree what the keystream is called', () =
 test('round 77: the loading screen says which chunk it is on', () => {
   const play = readFileSync(join(root, 'scripts', 'recomp', 'web', 'play.mjs'), 'utf8');
   assert.ok(play.includes('window.__isaacPortableData.onChunk = (got, total) => {'), 'the page listens');
-  assert.match(portable, /if \(P\.onChunk\) \{ try \{ P\.onChunk\(loadedN, P\.chunks \|\| 0\); \}/, 'the provider counts');
+  // round 89d: it counts what the first frame is waiting for, not every chunk,
+  // and goes quiet once that wait is over
+  assert.match(portable, /if \(quiet \|\| !P\.onChunk\) return;/, 'the provider counts until the wait is over');
+  assert.match(portable, /P\.onChunk\(Math\.min\(loadedN, tot\), tot\);/, 'never past its own total');
   assert.match(portable, /"chunks": n_a \+ n_b,/, 'and the page is told how many there are');
+});
+
+test('round 90f: the cache evicts what has been read, not the boot\'s next chunk', () => {
+  // The prefetch inserts the boot's chunks in trail order and a read moves its
+  // chunk to the young end, so the OLDEST entries are the ones the boot has not
+  // reached. Oldest-first eviction took exactly those: on the CDN the title came
+  // 232 s after the first frame. Run the provider's own cache code to show it.
+  const js = portable.slice(portable.indexOf('PROVIDER_JS = r"""'));
+  const cut = (from, to) => {
+    const a = js.indexOf(from), b = js.indexOf(to, a);
+    assert.ok(a >= 0 && b > a, `provider section ${from.trim()}`);
+    return js.slice(a, b);
+  };
+  const src = 'var cache = new Map();\n'
+    + cut('  var CACHE_STEADY', '  // round 77: the chunks are XORed')
+    + cut('  var unread = Object.create(null)', '  // resolves when there is room to fetch another')
+    + 'return { cache, trim, remember, touch, wasRead, max: (n) => { CACHE_MAX = n; }, bootOver: BOOT_OVER_FRAME };';
+  const C = new Function(src)();
+  C.max(1000);                                          // the boot's budget: the whole head
+  for (const k of ['0:0', '0:1', '1:0', '1:1', '1:2', '1:3']) C.remember(k, new Uint8Array(10));
+  for (const k of ['0:0', '0:1', '1:0']) { C.touch(k); C.wasRead(k); }
+  C.max(35); C.trim();                                  // room for three
+  assert.deepEqual([...C.cache.keys()].sort(), ['1:1', '1:2', '1:3'],
+    'the three the boot has not read survive; the three it has are the ones evicted');
+  // the boot's budget is its head, uncapped: summing stored sizes undercounted
+  // part A (stored gzipped) and evicted it during the prefetch itself
+  assert.match(portable, /CACHE_MAX = Infinity;/);
+  assert.doesNotMatch(portable, /CACHE_MAX = want \+ S\[head\[0\]\[0\]\]\.size/);
+  // a prefetch is not a read, or the head's own fetches would look finished
+  assert.match(portable, /piece\(jobs\[k\]\[0\], jobs\[k\]\[1\], paced \? 2 : 1\)/);
+  assert.match(portable, /if \(pre === 2\) markUnread\(key\);/, 'and only the paced stream counts toward its pacing');
+  // the budget drops, and the leftovers start, when the boot is over -- the
+  // frame boot_web.mjs itself calls the end of the boot, not the first one
+  assert.equal(C.bootOver, Number(/READER_CLEAR_FRAME = (\d+)/.exec(bootWeb)[1]));
+  assert.match(portable, /if \(\(window\.isaacFrame \|\| 0\) >= BOOT_OVER_FRAME \|\| Date\.now\(\) - t0 > 300000\) \{/);
+  // and it happens whether or not anything is left to stream: under `if (more)`
+  // a trail that touched every chunk would have kept the boot uncapped for good
+  assert.doesNotMatch(portable, /var more = await prefetchAll\(\);\s*\n\s*if \(more\) \{/);
+  assert.match(portable, /var later = function \(\) \{ if \(more\) more\(\); \};/);
+});
+
+test('round 90f: a chunked page is never built without its boot trail', () => {
+  // Rounds 90 to 90e shipped a dist built without ship.py --trail. The page then
+  // prefetched the whole payload before its first frame, through a cache sized
+  // for the steady state, and nothing in either build said so.
+  const ship = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'ship.py'), 'utf8');
+  assert.match(ship, /"trail": os\.path\.join\(ROOT, "scripts", "recomp", "assets", TRAIL_NAME\),/,
+    'ship.py ships the recorded trail by default');
+  assert.match(ship, /p\.add_argument\("--trail", default=DEFAULTS\["trail"\]/);
+  assert.match(ship, /no boot trail at %s/, 'and a missing trail file is an error, not a skip');
+  assert.match(portable, /if not has_trail and not args\.no_trail:\s*\n\s*raise SystemExit/,
+    'portable.py refuses a chunked build whose dist has no trail');
+  assert.doesNotMatch(portable, /-- the modules and the boot trail are in it, nothing else is needed"\s*\n\s*% \(/,
+    'and its summary only claims a trail when the page has one');
+  // the recorded trail is in the tree, parses, and names only windowed archives
+  const trail = JSON.parse(readFileSync(join(root, 'scripts', 'recomp', 'assets', 'boot-trail.json'), 'utf8'));
+  assert.ok(Array.isArray(trail) && trail.length > 100, `a real trail (${trail.length} reads)`);
+  const windowed = new Set([.../"(resources\/packed\/[a-z]+\.a)"/g[Symbol.matchAll](/WINDOWED = \(([^)]*)\)/.exec(portable)[1])].map((m) => m[1]));
+  assert.equal(windowed.size, 4, 'the four windowed archives');
+  for (const [f, off, len] of trail) {
+    assert.ok(windowed.has(f), `${f}: a windowed archive`);
+    assert.ok(Number.isInteger(off) && off >= 0 && Number.isInteger(len) && len > 0, `${f}@${off}: offset and length`);
+    assert.ok((off % 1048576) + len <= 1048576, `${f}@${off}+${len}: a read inside one window`);
+  }
+});
+
+test('round 90f: part B can be served from its own pinned base', () => {
+  // one base pinned per deploy moved all 32 URLs every time, and a returning
+  // visitor re-fetched 512 MB of unchanged part B
+  assert.match(portable, /return \(S\[s\]\.base \|\| P\.base\) \+ '\/' \+ S\[s\]\.tag \+ i \+ '\.bin'/);
+  assert.match(portable, /streams\[1\]\["base"\] = args\.base_b\.rstrip\("\/"\)/);
+  assert.match(portable, /p\.add_argument\("--base-b"/);
+  const check = readFileSync(join(root, 'scripts', 'recomp', 'assets', 'check_deployed.mjs'), 'utf8');
+  assert.match(check, /baseOf\[`\$\{s\.tag\}\$\{i\}`\] = s\.base \|\| `\$\{CDN\}\/c`;/, 'check_deployed reads each stream where the page does');
+  assert.match(check, /await fetch\(`\$\{baseOf\[n\]\}\/\$\{n\}\.bin`/);
 });
 
 test('round 77: every page module parses, before and after minifying', async (t) => {

@@ -1394,7 +1394,7 @@ common_exit:
  * can be found from a player's log, and skips the block when they are wrong.
  * A skipped block is a moment of wrong audio; the alternative is the run.
  */
-int isaac_vorbis_bitrev_ok(uint32_t init_va, uint32_t x_va) {
+int isaac_fast_vorbis_bitrev_ok(uint32_t init_va, uint32_t x_va) {
     uint32_t n, half, trig, bitrev, k, entries;
     static int reported;
     if (!isaac_is_guest_va(init_va) || !isaac_is_guest_va(init_va + 0x13u)) return 0;
@@ -1473,7 +1473,7 @@ void isaac_fast_quad_copy(uint32_t self_va, uint32_t src_va) {
  * truncation TRAPS out of range, which the x87 does not.
  *   NaN, +-inf, |d| >= 2^63  -> 0x8000000000000000 (integer indefinite)
  *   otherwise                -> d truncated toward zero */
-int64_t isaac_x87_trunc_i64(double d) {
+int64_t isaac_fast_x87_trunc_i64(double d) {
     uint64_t bits, m, mag;
     uint32_t exp;
     int32_t e;

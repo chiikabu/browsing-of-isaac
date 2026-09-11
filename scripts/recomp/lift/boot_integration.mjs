@@ -95,7 +95,23 @@ if (stage === 'layout') { console.log(`\nRESULT: layout ${layoutBad ? 'FAIL' : '
 // ISAAC_INSTANCE_DIR=<dir> boots from another instance tree (round 28: the
 // shipping bundle, .scratch/game-bundle, is proven by booting from it). The
 // cwd rule below still applies: run from that same directory.
-const INSTANCE_DIR = (process.env.ISAAC_INSTANCE_DIR || 'C:/Users/Luca/Desktop/isaac/.scratch/game-instance')
+// The default tree is .scratch/game-instance in the repo this file belongs to,
+// found by walking up from the file itself: a boot dir runs a COPY of it, so a
+// fixed relative path would not do.
+const nodePath = await import('node:path');
+const nodeUrl = await import('node:url');
+function defaultInstanceDir() {
+  let d = nodePath.dirname(nodeUrl.fileURLToPath(import.meta.url));
+  for (let i = 0; i < 10; i++) {
+    const c = nodePath.join(d, '.scratch', 'game-instance');
+    if (existsSync(c)) return c;
+    const up = nodePath.dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return nodePath.join(process.cwd(), '.scratch', 'game-instance');
+}
+const INSTANCE_DIR = (process.env.ISAAC_INSTANCE_DIR || defaultInstanceDir())
   .replace(/\\/g, '/').replace(/\/+$/, '');
 const PACKED_DIR = `${INSTANCE_DIR}/resources/packed`;
 const BOOT_ARCHIVES = ['graphics.a', 'config.a', 'fonts.a', 'animations.a', 'rooms.a', 'sfx.a'];

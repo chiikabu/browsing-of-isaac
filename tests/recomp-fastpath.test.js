@@ -8,7 +8,8 @@
 //   - consults isaac_fastpath_mode() (0 lifted / 1 host / 2 verify),
 //   - ends the host path with the exact ret emulation,
 //   - calls a host function that host_fastpath.c defines and recomp_rt.h
-//     declares, and the verify path reports through isaac_fastpath_mismatch.
+//     declares, and the verify path reports through isaac_fastpath_mismatch
+//     (or, where the lifted body is itself the defect, NO_VERIFY says why).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
@@ -35,6 +36,15 @@ function patchesIn(startMarker, endMarker) {
 // categories with different contracts (round 23)
 const wrapPatches = () => patchesIn('WRAP_PATCHES: dict', 'PROBE_PATCHES: dict');
 const probePatches = () => patchesIn('PROBE_PATCHES: dict', 'def apply_wrap_patches');
+// A wrapper may go without a verify path only where there is nothing honest to
+// compare: the lifted body is itself the defect the wrapper replaces (comparing
+// against it would report the bug, not a difference), or the wrapper is a guard
+// with no host result of its own. Each one is named here with the reason, and
+// must say so in its own body as well.
+const NO_VERIFY = {
+  '0x00af0800': 'CRT x87 float->int64: the lifted fallback tests an 80-bit exponent the runtime keeps as zero, so it returns 0 for everything (round 90e)',
+  '0x00abb750': 'libvorbis mdct_bitreverse guard: it only decides whether the lifted body may run, so there is no host result to compare (round 90)',
+};
 
 test('WRAP_PATCHES: every wrapper keeps the lifted body, consults the mode, and owns the ret', () => {
   const patches = wrapPatches();
@@ -47,7 +57,11 @@ test('WRAP_PATCHES: every wrapper keeps the lifted body, consults the mode, and 
     assert.ok(body.includes(`RECOMP_VA(0x${va.slice(2).replace(/^0+/, '')}u);`), `${name}: stamps its VA`);
     assert.ok(body.includes(`${name}__lifted(s)`), `${name}: lifted body reachable (ISAAC_FASTPATH=0)`);
     assert.ok(body.includes('isaac_fastpath_mode()'), `${name}: consults the fastpath mode`);
-    assert.ok(body.includes('isaac_fastpath_mismatch('), `${name}: verify path reports mismatches`);
+    if (NO_VERIFY[va]) {
+      assert.ok(body.includes('no verify path, on purpose:'), `${name}: says in its body why it has no verify path`);
+    } else {
+      assert.ok(body.includes('isaac_fastpath_mismatch('), `${name}: verify path reports mismatches`);
+    }
     // the host path must end with the callee's ret: pop EIP, ESP += 4 (+ the
     // callee's own purge for a `ret N`, spelled `4u + Nu`)
     const ret = /s->EIP = MEMR32\(s->ESP\);\s*\n\s*s->ESP \+= 4u(?: \+ \d+u)?;\s*\n}\s*$/;

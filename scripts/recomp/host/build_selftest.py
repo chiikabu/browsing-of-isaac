@@ -28,8 +28,7 @@ def find_emcc():
     """
     cand = os.environ.get("EMCC")
     roots = [cand] if cand else []
-    roots += [r"C:\Users\Luca\emsdk\upstream\emscripten\emcc",
-              str(Path.home() / "emsdk" / "upstream" / "emscripten" / "emcc"),
+    roots += [str(Path.home() / "emsdk" / "upstream" / "emscripten" / "emcc"),
               "emcc"]
     for r in roots:
         for ext in (".exe", ".bat", ".cmd", ""):

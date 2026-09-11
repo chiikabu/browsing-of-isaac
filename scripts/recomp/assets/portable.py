@@ -375,15 +375,27 @@ PROVIDER_JS = r"""
   // reads a known set -- the trail's chunks -- and a ceiling below that set just
   // evicts what it has not finished with and makes it fetch the same 19 MB
   // twice: measured at 3.7 s added to frame 300. So the boot gets a budget
-  // sized to its own working set, and once a frame exists that drops to STEADY
-  // and the LRU drains. Nothing the boot read is worth keeping by then.
+  // sized to its own working set, and once the boot is over (BOOT_OVER_FRAME)
+  // that drops to STEADY and the LRU drains.
   var CACHE_STEADY = 256 * 1048576;
   var CACHE_MAX = CACHE_STEADY, cacheBytes = 0;
+  // boot_web.mjs's READER_CLEAR_FRAME: the title is up and its resources read
+  var BOOT_OVER_FRAME = 600;
+  // Round 90f: evict what a read has already taken, not simply the oldest. The
+  // prefetch inserts in trail order and a read moves its chunk to the young
+  // end, so the OLDEST entries are the prefetched chunks nothing has read yet --
+  // the very next ones the boot asks for. Oldest-first threw out exactly the
+  // next chunk, its re-fetch evicted the one after it, and on a CDN each of
+  // those is a 19 MB GET. An unread chunk goes only when nothing read is left.
+  var readOnce = Object.create(null);
   function trim() {
     while (cacheBytes > CACHE_MAX && cache.size > 1) {
-      var oldest = cache.keys().next().value;
-      cacheBytes -= cache.get(oldest).length;
-      cache.delete(oldest);
+      var victim = null, it = cache.keys(), k;
+      for (k = it.next(); !k.done; k = it.next()) if (readOnce[k.value]) { victim = k.value; break; }
+      if (victim === null) victim = cache.keys().next().value;
+      cacheBytes -= cache.get(victim).length;
+      cache.delete(victim);
+      delete readOnce[victim];
     }
   }
   function remember(key, u) {
@@ -448,9 +460,14 @@ PROVIDER_JS = r"""
   // the token comes from the chunk's own bytes, so a chunk that changed has a
   // URL that changed and a browser holding the old one under a week-long
   // max-age cannot splice it into this build (round 86d)
+  // Round 90f: a stream may carry its own base. Part B has not changed since
+  // round 89b, but with one base pinned to each deploy's commit every deploy
+  // moved all 32 URLs, and a returning visitor fetched 512 MB their cache
+  // already held. Pinned to the commit that last changed it, part B keeps its
+  // URLs until its bytes change.
   function name(s, i) {
     var v = S[s].v && S[s].v[i];
-    return P.base + '/' + S[s].tag + i + '.bin' + (v ? '?v=' + v : '');
+    return (S[s].base || P.base) + '/' + S[s].tag + i + '.bin' + (v ? '?v=' + v : '');
   }
   // Is chunk i of stream s actually compressed? A stream may be gzipped and
   // still hold raw chunks: a window of Theora or Vorbis gives nothing back, so
@@ -500,20 +517,23 @@ PROVIDER_JS = r"""
   // reading it and the background prefetch pulling it -- and each was a whole
   // 19 MB GET of its own. One request, both waiters.
   var flight = new Map();
-  // `pre` marks a call made by the streamer rather than by a read. The
-  // difference matters only to the pacing below: a chunk nobody has read yet is
-  // what the streamer is not allowed to pile up.
+  // `pre` marks a call made by a prefetcher rather than by a read: 1 for the
+  // boot's head, 2 for the paced stream behind the game. A prefetch is never a
+  // read -- trim() spares chunks nothing has read, and a head fetch counted as
+  // a read would make the chunks the boot has not reached look finished. Only
+  // the stream is paced: a chunk it fetched that nobody has read yet is what it
+  // may not pile up.
   function piece(s, i, pre) {
     var key = s + ':' + i, hit = touch(key);
-    if (hit) { if (!pre) markRead(key); return Promise.resolve(hit); }
+    if (hit) { if (!pre) wasRead(key); return Promise.resolve(hit); }
     var busy = flight.get(key);
-    if (busy) return pre ? busy : busy.then(function (u) { markRead(key); return u; });
+    if (busy) return pre ? busy : busy.then(function (u) { wasRead(key); return u; });
     var pr = piece1(s, i);
     flight.set(key, pr);
     pr = pr.then(function (u) { flight.delete(key); return u; },
                  function (e) { flight.delete(key); throw e; });
-    if (pre) { pr.then(function () { markUnread(key); }, function () {}); return pr; }
-    return pr.then(function (u) { markRead(key); return u; });
+    if (pre) { pr.then(function () { if (pre === 2) markUnread(key); }, function () {}); return pr; }
+    return pr.then(function (u) { wasRead(key); return u; });
   }
   // How far the streamer may run ahead of the reader. Chunks it has fetched
   // that nothing has read yet are the only ones that MUST stay resident, so
@@ -532,6 +552,12 @@ PROVIDER_JS = r"""
     delete unread[k]; unreadN -= 1;
     var w = waiting; waiting = [];
     for (var j = 0; j < w.length; j++) w[j]();
+  }
+  // a read took this chunk: trim() may have it now, and the stream's count of
+  // chunks nobody has read goes down
+  function wasRead(k) {
+    if (cache.has(k)) readOnce[k] = 1;
+    markRead(k);
   }
   // resolves when there is room to fetch another, or after a second regardless:
   // the trail is the LAST boot's reads and this one may not want all of them,
@@ -749,7 +775,7 @@ PROVIDER_JS = r"""
         if (k >= jobs.length) return;
         // paced: never hold more than AHEAD chunks nothing has read yet
         if (paced) await room();
-        try { await piece(jobs[k][0], jobs[k][1], paced); } catch (e) { /* a later read asks again */ }
+        try { await piece(jobs[k][0], jobs[k][1], paced ? 2 : 1); } catch (e) { /* a later read asks again */ }
       }
     }
     var crew = [], w;
@@ -820,17 +846,23 @@ PROVIDER_JS = r"""
     // rebuilds at a crawl, and widening the stream did not move it. The
     // fetching has to finish BEFORE the engine starts, which is what 89d had.
     //
-    // What bounds the memory now is the cache alone. The prefetch inserts in
-    // trail order and the boot reads in trail order, so the least recently used
-    // chunk is one the boot has already read -- eviction lands on dead weight.
-    // If the boot ever falls behind the fetch, the cost is one more 19 MB GET,
-    // not a stall.
+    // What bounds the memory now is the cache alone. (This said the least
+    // recently used chunk is one the boot has already read. It is not: a read
+    // moves its chunk to the young end, so the oldest are the ones not read
+    // yet, and oldest-first eviction took the boot's next chunk every time.
+    // Round 90f: trim() evicts read chunks first.)
     var head = t.need;
-    // the boot's own ceiling: everything it is about to read, plus one spare
+    // The boot's own ceiling: none. Round 90f: this was the head's size plus
+    // one spare, summed from S[].size -- the STORED size, and part A is stored
+    // gzipped, so the chunks it inflates to overran the budget during the
+    // prefetch itself and evicted part A before the module had been read out
+    // of it (measured: a0-a3 each fetched twice, the second time just before
+    // the first frame). The head IS what the boot is about to read; holding
+    // it is the point. STEADY comes back when the boot is over.
     var want = 0;
     for (i = 0; i < head.length; i++) want += S[head[i][0]].size;
-    if (want + S[head[0][0]].size > CACHE_MAX) CACHE_MAX = want + S[head[0][0]].size;
-    P.prefetch = { head: head.length, rest: rest.length, of: all.length, cacheMB: Math.round(CACHE_MAX / 1048576) };
+    CACHE_MAX = Infinity;
+    P.prefetch = { head: head.length, rest: rest.length, of: all.length, headMB: Math.round(want / 1048576) };
     awaiting = head.length;
     await fetchList(head, 6);
     // the wait is over: say so once, then stop talking. What follows is not
@@ -856,7 +888,11 @@ PROVIDER_JS = r"""
       // ranges lie, so a window is a 19 MB GET; doing that mid-room is the
       // freeze. What the boot does NOT read follows it down in the background.
       var more = await prefetchAll();
-      if (more) {
+      // Round 90f: this block used to sit under `if (more)`. With the boot's
+      // budget uncapped, a build whose trail touches every chunk would then
+      // never leave it; the switch to STEADY has to happen either way, and only
+      // the leftover stream needs something left to stream.
+      {
         // Round 89d: the ones no boot reads, not before the game is up.
         // Between ready and the first frame the module still has to compile and
         // the engine still has to mount its archives, and a 19 MB GET with
@@ -869,12 +905,16 @@ PROVIDER_JS = r"""
         // its own reads, which looks idle, so requestIdleCallback fired during
         // the boot and pulled thirteen more chunks through the cache --
         // evicting the trail chunks the boot had not finished with, which it
-        // then fetched again. Wait for a frame: that is the game running, and
-        // it is the only signal here that the boot is actually done.
-        var later = function () { more(); };
+        // then fetched again. Round 90f: and not on the FIRST frame either.
+        // The trail holds the reads up to frame 300 and the title's resources
+        // come after it; boot_web.mjs calls the boot over at frame 600
+        // (READER_CLEAR_FRAME), and so does this. At frame 1 the boot is still
+        // reading its trail, and dropping to STEADY then evicted the chunks it
+        // had not reached -- each one a 19 MB GET again on a CDN.
+        var later = function () { if (more) more(); };
         var t0 = Date.now();
         var whenRunning = function () {
-          if ((window.isaacFrame || 0) > 0 || Date.now() - t0 > 120000) {
+          if ((window.isaacFrame || 0) >= BOOT_OVER_FRAME || Date.now() - t0 > 300000) {
             // the boot is done with its working set: give the memory back
             CACHE_MAX = CACHE_STEADY; trim();
             if (typeof requestIdleCallback === 'function') requestIdleCallback(later, { timeout: 30000 });
@@ -893,6 +933,11 @@ PROVIDER_JS = r"""
     chunks: P.chunks || 0,
     rangesWhy: function () { return P.rangesWhy || null; },
     loaded: function () { return loadedN; },
+    // round 90f: what the chunk cache holds, for a driver measuring the loader
+    cache: function () {
+      return { mb: Math.round(cacheBytes / 1048576), n: cache.size,
+               maxMB: CACHE_MAX === Infinity ? null : Math.round(CACHE_MAX / 1048576) };
+    },
     // a window inside one raw chunk is a URL with the range in its fragment; the
     // reader Worker strips it and sends a Range header (boot_web.mjs)
     urlFor: P.base ? function (rel, off, len) {
@@ -977,6 +1022,16 @@ def inject_at_end(html: str, tail: str) -> str:
 
 
 def cmd_chunks(args) -> int:
+    # Round 90f: without a boot trail the page cannot tell the chunks the boot
+    # reads from the rest, so it prefetches all of them before the first frame
+    # -- 543 MB where the boot needs ~330 -- through a cache sized for the steady
+    # state. Rounds 90 to 90e shipped exactly that: the dist had been built
+    # without ship.py --trail, and nothing said so.
+    has_trail = os.path.isfile(os.path.join(args.dist, "boot-trail.json"))
+    if not has_trail and not args.no_trail:
+        raise SystemExit("%s has no boot-trail.json: rebuild it with ship.py (which ships "
+                         "scripts/recomp/assets/boot-trail.json by default), or pass --no-trail "
+                         "to build a page that prefetches the whole payload" % args.dist)
     files = plan(args.dist, set(args.skip or []))
     whole, windowed = split_parts(files)
     table = {}
@@ -1122,6 +1177,8 @@ def cmd_chunks(args) -> int:
             "chunks": n_a + n_b, "status": "loading"}
     if key:
         data["key"] = base64.b64encode(key).decode("ascii")
+    if getattr(args, "base_b", None) and len(streams) > 1:
+        streams[1]["base"] = args.base_b.rstrip("/")
     # the boot trail is small and boot_web.mjs asks for it by name: inline it so the
     # page needs nothing beside itself
     trail = os.path.join(args.dist, "boot-trail.json")
@@ -1146,8 +1203,10 @@ def cmd_chunks(args) -> int:
     print("chunks: %d files in %s (%s on disk, %s raw)" % (n_a + n_b, data_dir, human(written[0]), human(raw)))
     print("  read whole, gzipped : %d x %s  (%s)" % (n_a, human(a_size), human(a_len)))
     print("  read by range, raw  : %d x %s  (%s)" % (n_b, human(b_size), human(b_len)))
-    print("  page %s (%s) -- the modules and the boot trail are in it, nothing else is needed"
-          % (os.path.join(out_dir, "index.html"), human(len(html.encode("utf-8")))))
+    print("  page %s (%s) -- %s"
+          % (os.path.join(out_dir, "index.html"), human(len(html.encode("utf-8"))),
+             "the modules and the boot trail (%d reads) are in it, nothing else is needed" % len(data["trail"])
+             if "trail" in data else "the modules are in it and NO boot trail: it prefetches the whole payload"))
     print("  base URL: %s" % data["base"])
     if n_a + n_b > 64:
         print("  %d files: no range is needed at this size, which suits a host whose ranges cannot be trusted"
@@ -1219,6 +1278,9 @@ def main(argv=None) -> int:
     p.add_argument("dist"); p.add_argument("out")
     p.add_argument("--chunks", type=int, default=12, help="how many files the payload becomes (default 12)")
     p.add_argument("--base", help="where the chunks will be served from (default ./c)")
+    p.add_argument("--base-b", help="where part B (the windowed archives) is served from, if not --base: pin it "
+                                    "to the commit that last changed part B, and a deploy that only touches part A "
+                                    "leaves a returning visitor's cached part B valid (round 90f)")
     p.add_argument("--skip", nargs="*", help="archive file names to leave out")
     p.add_argument("--part-mib", type=int, default=0,
                    help="size of each windowed chunk in MiB instead of a file count; 1 makes a chunk "
@@ -1240,6 +1302,9 @@ def main(argv=None) -> int:
     p.add_argument("--key-of", help="take --key-b64 out of an earlier build's index.html")
     p.add_argument("--catalogue", help="where modpack.py's catalogue is served from; without one the "
                                        "page offers no MOD BROWSER row")
+    p.add_argument("--no-trail", action="store_true",
+                   help="build even though the dist has no boot-trail.json (the page then prefetches the "
+                        "whole payload before its first frame; round 90f)")
     p.set_defaults(fn=cmd_chunks)
     p = sub.add_parser("offline")
     p.add_argument("dist"); p.add_argument("out")

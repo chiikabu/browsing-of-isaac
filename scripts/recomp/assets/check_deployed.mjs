@@ -63,8 +63,10 @@ const open = page.indexOf('{', at);
 let depth = 0, end = open;
 for (; end < page.length; end++) { if (page[end] === '{') depth++; else if (page[end] === '}' && !--depth) { end++; break; } }
 const P = JSON.parse(page.slice(open, end));
-const names = [];
-for (const s of P.streams) for (let i = 0; i < s.n; i++) names.push(`${s.tag}${i}`);
+// round 90f: a stream may have its own base (part B is pinned to the commit
+// that last changed it), so each chunk is asked for where the page will ask
+const names = [], baseOf = {};
+for (const s of P.streams) for (let i = 0; i < s.n; i++) { names.push(`${s.tag}${i}`); baseOf[`${s.tag}${i}`] = s.base || `${CDN}/c`; }
 const rest = names.filter((n) => !/^a\d+$/.test(n));
 const HEAD_BYTES = 65536;
 const front = async (stream) => {
@@ -87,7 +89,7 @@ for (const n of rest) {
   const want = sha(buf);
   let got;
   try {
-    const r = await fetch(`${CDN}/c/${n}.bin`, { cache: 'no-store', headers: { 'accept-encoding': 'identity' } });
+    const r = await fetch(`${baseOf[n]}/${n}.bin`, { cache: 'no-store', headers: { 'accept-encoding': 'identity' } });
     got = r.ok ? sha(await front(r.body)) : `HTTP ${r.status}`;
   } catch (e) { got = e.message; }
   await new Promise((r) => setTimeout(r, 250));   // 403s come back if this runs flat out

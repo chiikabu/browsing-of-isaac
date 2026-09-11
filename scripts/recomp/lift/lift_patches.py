@@ -410,13 +410,13 @@ WRAP_PATCHES: dict[int, str] = {
     # FASTPATH=0 still runs it, for the A/B.
     0x00af0800: """void sub_00af0800(CpuState *restrict s) {
   /* LIFT-PATCH wrap 0x00af0800: x87 ST0 -> int64 truncation (host_fastpath.c) */
+  /* no verify path, on purpose: the lifted body IS the defect (round 90e) */
   RECOMP_VA(0xaf0800u);
   if (isaac_fastpath_mode() == 0) { sub_00af0800__lifted(s); return; }
-  uint32_t esp0 = s->ESP;
-  int64_t v = isaac_x87_trunc_i64(recomp_get80(&s->ST0[0]));
+  int64_t v = isaac_fast_x87_trunc_i64(recomp_get80(&s->ST0[0]));
   s->EAX = (uint32_t)(uint64_t)v;
   s->EDX = (uint32_t)((uint64_t)v >> 32);
-  s->ECX = esp0;                                   /* as the fast path leaves it */
+  s->ECX = s->ESP;                                 /* the entry ESP, as the fast path leaves it */
   /* fisttp pops ST0: the stack shifts down, exactly as the lifted fast path does */
   memcpy(&s->ST0[0], &s->ST1[0], 10);
   memcpy(&s->ST1[0], &s->ST2[0], 10);
@@ -425,8 +425,8 @@ WRAP_PATCHES: dict[int, str] = {
   memcpy(&s->ST4[0], &s->ST5[0], 10);
   memcpy(&s->ST5[0], &s->ST6[0], 10);
   memcpy(&s->ST6[0], &s->ST7[0], 10);
-  s->EIP = MEMR32(esp0);                           /* plain ret */
-  s->ESP = esp0 + 4u;
+  s->EIP = MEMR32(s->ESP);
+  s->ESP += 4u;
 }
 """,
     # The vertex-quad copy constructor (round 90d): `this` in ecx, the source
@@ -453,8 +453,9 @@ WRAP_PATCHES: dict[int, str] = {
   }
   isaac_fast_quad_copy(self, src);
   s->EAX = self;                 /* the ctor hands `this` back in EAX */
+  /* ret 4: the return address and the argument */
   s->EIP = MEMR32(s->ESP);
-  s->ESP += 8u;                  /* ret 4: the return address and the argument */
+  s->ESP += 4u + 4u;
 }
 """,
     # libvorbis mdct_bitreverse (round 90): init in ecx, x in edx, plain ret.
@@ -466,15 +467,15 @@ WRAP_PATCHES: dict[int, str] = {
     # it checks the lookup, and when it is wrong it reports the values once
     # and skips the block instead of trapping. Wrong audio for a moment beats
     # a dead run, and the report is what identifies the real bug from a log.
+    # ISAAC_FASTPATH=0 runs the lifted body unguarded, for the A/B.
     0x00abb750: """void sub_00abb750(CpuState *restrict s) {
   /* LIFT-PATCH wrap 0x00abb750: guard mdct_bitreverse (host_fastpath.c) */
+  /* no verify path, on purpose: a guard, with no host result to compare (round 90) */
   RECOMP_VA(0xabb750u);
-  if (!isaac_vorbis_bitrev_ok(s->ECX, s->EDX)) {
-    s->EIP = MEMR32(s->ESP);
-    s->ESP += 4u;
-    return;
-  }
-  sub_00abb750__lifted(s);
+  if (isaac_fastpath_mode() == 0 || isaac_fast_vorbis_bitrev_ok(s->ECX, s->EDX)) { sub_00abb750__lifted(s); return; }
+  /* a lookup mdct_init did not fill: skip the block rather than trap */
+  s->EIP = MEMR32(s->ESP);
+  s->ESP += 4u;
 }
 """,
     # stb_vorbis inverse_mdct (round 50): buffer in ecx, n in edx, (f,

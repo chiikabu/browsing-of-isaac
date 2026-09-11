@@ -72,6 +72,11 @@ DEFAULTS = {
     "segs": os.path.join(ROOT, "output", "recomp", "host", SEGS_NAME),
     "web": os.path.join(ROOT, "scripts", "recomp", "web"),
     "dist": os.path.join(ROOT, ".scratch", "game-dist"),
+    # round 90f: the trail this payload's archive layout was recorded with.
+    # Rounds 90 to 90e built without --trail, and the chunked page then
+    # prefetched the whole payload before its first frame; a default makes that
+    # impossible to forget.
+    "trail": os.path.join(ROOT, "scripts", "recomp", "assets", TRAIL_NAME),
 }
 
 # The index policy of run_web.mjs, mirrored: skip exe/dll/so/ogv, the top-level packed/ and
@@ -238,6 +243,13 @@ def cmd_build(args) -> int:
         if dist == d or dist.startswith(d + os.sep):
             print("refusing to build the dist inside one of its sources (%s)" % d, file=sys.stderr)
             return 2
+    if getattr(args, "no_trail", False):
+        args.trail = ""
+    elif args.trail and not os.path.isfile(args.trail):
+        print("no boot trail at %s: pass --trail <file>, or --no-trail to ship a dist without one "
+              "(a chunked page built from it prefetches the whole payload before its first frame)"
+              % args.trail, file=sys.stderr)
+        return 2
     # --- inputs
     problems, bman = bundle_tool.check_bundle(bundle_dir, quick=True)
     if problems:
@@ -511,8 +523,11 @@ def main(argv=None) -> int:
     p.add_argument("--web", default=DEFAULTS["web"], help="where play.html, play.mjs and boot_web.mjs live")
     p.add_argument("--dist", default=DEFAULTS["dist"], help="the output folder, default .scratch/game-dist")
     p.add_argument("--copy", action="store_true", help="copy the bundle's files instead of hard-linking them")
-    p.add_argument("--trail", default="", help="a boot trail (drive_boot.mjs writes <out>/boot-trail.json) shipped as /boot-trail.json: "
-                   "a first visit's reader fetches the windows it names ahead of the engine")
+    p.add_argument("--trail", default=DEFAULTS["trail"], help="a boot trail (drive_boot.mjs writes <out>/boot-trail.json) shipped as /boot-trail.json: "
+                   "a first visit's reader fetches the windows it names ahead of the engine "
+                   "(default: scripts/recomp/assets/boot-trail.json, recorded against this archive layout)")
+    p.add_argument("--no-trail", action="store_true", help="ship no boot trail at all (a chunked page built from "
+                   "such a dist prefetches the whole payload before its first frame)")
     p.add_argument("--no-compress", action="store_true", help="no precompressed siblings at all")
     p.add_argument("--no-brotli", action="store_true", help="gzip siblings only")
     p.add_argument("--brotli-quality", type=int, default=11)

@@ -1096,7 +1096,7 @@ links them, and runs the result under node. **[M]**
 | artifact | ~150,000-byte wasm |
 | run | **55 checks, 0 failures** |
 
-emcc 6.0.5 at `C:\Users\Luca\emsdk\upstream\emscripten\emcc.exe`. It is not
+emcc 6.0.5 at `%USERPROFILE%\emsdk\upstream\emscripten\emcc.exe`. It is not
 on `PATH`; `build_selftest.py` probes the extension explicitly, because
 `Path("...\emcc").exists()` is False on Windows while a POSIX shell resolves
 the same bare name to `emcc.exe` — which is what caused this layer to be
