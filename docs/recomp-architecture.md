@@ -8367,3 +8367,48 @@ out an input produces a page that works, only slowly, and nothing about a
 working page says what it is missing. A run against the real transport --
 throttled, counting GETs -- found in minutes what four rounds of local testing
 could not show, because against a local server a re-fetch costs nothing.
+
+### 21.115 Round 90g: the chunk that is read twice
+
+With the trail back, one chunk was still fetched twice in every run -- b19,
+first during the head prefetch and again as the title came up -- and on the
+live CDN three were (b19, b21, b2). Two loader policies were built for it,
+tested, measured, and **reverted**, because neither changed anything:
+
+1. *The leftover stream's guesses evict trail chunks.* Guesses were made the
+   first thing evicted after read chunks, and the stream was stopped from
+   taking room it could only get by evicting an unread chunk (`fits()`).
+2. *A visitor who watches the intro reads the title's trail chunks after the
+   budget drops.* Unread trail chunks were pinned for five minutes after the
+   boot, over the budget if need be, and a chunk being inserted was never its
+   own victim.
+
+    loader (trail, 25 Mbit/s)      first frame  stalled  GETs       fetched twice
+    90f                            102.6 s      ~19 s    33 for 32  b19
+    + guesses evicted first        102.8 s      ~20 s    33 for 32  b19
+    + unread trail chunks pinned   103.3 s      ~19 s    33 for 32  b19
+
+The third run carried an eviction log, and it named the mistake in both
+hypotheses: `trailUnread` is **0 at the first frame**. Every chunk the trail
+names has been read before the game draws anything; there is no unread trail
+chunk to protect. b19 is read during the boot, dropped at frame 4016 as an
+ordinary *read* chunk (`1:19 read @4016`), and read **again** at the title,
+~8,000 frames later. That is a chunk the game genuinely reuses across the
+whole intro, and a 256 MB LRU cannot hold everything the intro reads in
+between. The re-fetch costs nothing measurable -- every one of these runs
+stalls ~19 s, the same as the page with no network limit at all (~21 s) -- and
+keeping it would take a steady budget near 320 MB of JS heap, which is not
+worth it on a 4 GB machine.
+
+What stays is the instrument: `isaacPortable.cache()` reports `evicted` (what
+went, why -- `read`, `trail` or `other` -- and at which frame) and
+`trailUnread`. Read it before building another eviction policy; both of these
+were built on a guess about which chunks were unread, and one log line
+settled it.
+
+**And the live Item Info check.** The first retake on the deployed page typed
+its console commands while the engine was blocked on a fetch at the start of
+the run: the console never opened, and the letters landed as game input (the
+`e` in "giveitem" is a bomb -- the screenshot has the scorch mark and half a
+heart gone). A driver that types into a page has to wait until frames are
+actually flowing, not just until a log line says the run began.

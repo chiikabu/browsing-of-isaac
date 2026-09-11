@@ -267,14 +267,17 @@ test('round 90f: the cache evicts what has been read, not the boot\'s next chunk
   const src = 'var cache = new Map();\n'
     + cut('  var CACHE_STEADY', '  // round 77: the chunks are XORed')
     + cut('  var unread = Object.create(null)', '  // resolves when there is room to fetch another')
-    + 'return { cache, trim, remember, touch, wasRead, max: (n) => { CACHE_MAX = n; }, bootOver: BOOT_OVER_FRAME };';
-  const C = new Function(src)();
+    + 'return { cache, trim, remember, touch, wasRead, evicted, headLeft, max: (n) => { CACHE_MAX = n; }, bootOver: BOOT_OVER_FRAME };';
+  const C = new Function('window', src)({ isaacFrame: 0 });
   C.max(1000);                                          // the boot's budget: the whole head
   for (const k of ['0:0', '0:1', '1:0', '1:1', '1:2', '1:3']) C.remember(k, new Uint8Array(10));
   for (const k of ['0:0', '0:1', '1:0']) { C.touch(k); C.wasRead(k); }
   C.max(35); C.trim();                                  // room for three
   assert.deepEqual([...C.cache.keys()].sort(), ['1:1', '1:2', '1:3'],
     'the three the boot has not read survive; the three it has are the ones evicted');
+  // round 90g: and it says what it dropped and why -- the instrument that
+  // closed 90g's two hypotheses (recomp-architecture §21.115)
+  assert.deepEqual(C.evicted.map((e) => e.replace(/ @\d+$/, '')), ['0:0 read', '0:1 read', '1:0 read']);
   // the boot's budget is its head, uncapped: summing stored sizes undercounted
   // part A (stored gzipped) and evicted it during the prefetch itself
   assert.match(portable, /CACHE_MAX = Infinity;/);

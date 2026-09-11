@@ -132,11 +132,22 @@
   // next chunk, its re-fetch evicted the one after it, and on a CDN each of
   // those is a 19 MB GET. An unread chunk goes only when nothing read is left.
   var readOnce = Object.create(null);
+  // Round 90g: an instrument, not a policy. `evicted` is what trim() dropped,
+  // why, and at which frame; `headLeft` the trail chunks nothing has read yet.
+  // Together they answered 90g: every trail chunk is read before the first
+  // frame, and the one chunk fetched twice is read AGAIN at the title and was
+  // dropped in between as an ordinary read chunk -- see recomp-architecture
+  // §21.115 before trying another eviction policy.
+  var headLeft = Object.create(null), evicted = [];
   function trim() {
     while (cacheBytes > CACHE_MAX && cache.size > 1) {
       var victim = null, it = cache.keys(), k;
       for (k = it.next(); !k.done; k = it.next()) if (readOnce[k.value]) { victim = k.value; break; }
       if (victim === null) victim = cache.keys().next().value;
+      if (evicted.length < 64) {
+        evicted.push(victim + (readOnce[victim] ? ' read' : headLeft[victim] ? ' trail' : ' other')
+          + ' @' + (window.isaacFrame || 0));
+      }
       cacheBytes -= cache.get(victim).length;
       cache.delete(victim);
       delete readOnce[victim];
@@ -301,6 +312,7 @@
   // chunks nobody has read goes down
   function wasRead(k) {
     if (cache.has(k)) readOnce[k] = 1;
+    delete headLeft[k];
     markRead(k);
   }
   // resolves when there is room to fetch another, or after a second regardless:
@@ -596,6 +608,7 @@
     // yet, and oldest-first eviction took the boot's next chunk every time.
     // Round 90f: trim() evicts read chunks first.)
     var head = t.need;
+    for (i = 0; i < head.length; i++) headLeft[head[i][0] + ':' + head[i][1]] = 1;
     // The boot's own ceiling: none. Round 90f: this was the head's size plus
     // one spare, summed from S[].size -- the STORED size, and part A is stored
     // gzipped, so the chunks it inflates to overran the budget during the
@@ -680,7 +693,8 @@
     // round 90f: what the chunk cache holds, for a driver measuring the loader
     cache: function () {
       return { mb: Math.round(cacheBytes / 1048576), n: cache.size,
-               maxMB: CACHE_MAX === Infinity ? null : Math.round(CACHE_MAX / 1048576) };
+               maxMB: CACHE_MAX === Infinity ? null : Math.round(CACHE_MAX / 1048576),
+               trailUnread: Object.keys(headLeft).length, evicted: evicted.slice() };
     },
     // a window inside one raw chunk is a URL with the range in its fragment; the
     // reader Worker strips it and sends a Range header (boot_web.mjs)

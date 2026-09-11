@@ -263,9 +263,11 @@ REQUIRE emsdk on PATH:
   Mbit/s, local twin): first frame 196.6 → 102.6 s, stalled ~111 → ~19 s, 52 →
   33 GETs, 862 → 560 MB (the 89i page, trail and old loader, measures the same
   as 90f; ~21 s is the floor — the same page unthrottled reads ~21 s, intro
-  frames under 60 fps). **Next:** b19 is still fetched twice — the trail names it, it is
-  unread when the budget drops, and the leftover stream's inserts evict it; a
-  stream that never evicts an unread chunk is the next measurement. **Deploy
+  frames under 60 fps). **Closed in 90g (§21.115):** b19 is fetched twice because the game
+  reads it twice -- in the boot and again at the title -- and the 256 MB LRU
+  drops it in between; two eviction policies were built, measured neutral and
+  reverted. `isaacPortable.cache()` reports `evicted` (what, why, which frame)
+  and `trailUnread`: read them before trying another. **Deploy
   rule:** build with `--base-b
   https://cdn.jsdelivr.net/gh/chiikabu/boi-portable@<last commit touching
   c/b*.bin>/c`, then pin only `@main/c` (part A) to the new payload commit.
