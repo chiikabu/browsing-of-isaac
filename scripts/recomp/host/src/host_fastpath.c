@@ -1450,3 +1450,40 @@ int isaac_fast_quad_copy_ok(uint32_t self_va, uint32_t src_va) {
 void isaac_fast_quad_copy(uint32_t self_va, uint32_t src_va) {
     memcpy(isaac_g(self_va), isaac_g(src_va), 112u);
 }
+
+/* ---- x87 ST0 -> int64, truncating (the fisttp in 0x00af0800) ------------
+ *
+ * Round 90e. 0x00af0800 is the CRT's float->int64 conversion (EDX:EAX from
+ * ST0, ST0 popped). It takes an SSE fast path -- fisttp -- only when the
+ * ISA-level cell 0xc7162c is >= 2, and in this build that cell reads 0 at
+ * runtime (measured: frame 41 and 457). The fallback it takes instead does
+ * `fstp tbyte` and tests the 80-bit EXPONENT WORD to decide the magnitude,
+ * and the lifter models an x87 register as a double in bytes 0..7 with bytes
+ * 8..9 zeroed (recomp_set80). So the exponent always reads 0, the "|x| < 1"
+ * branch is always taken, and every conversion returns 0. Native x87 has a
+ * real exponent there, so this is purely a port defect.
+ *
+ * Its visible cost: the Item Info panel (achievement 641's descriptions)
+ * measures each layout's LAST line through this routine, gets width 0, and
+ * derives the draw-pass wrap limit from those widths -- so the limit falls
+ * to ~0 for the title and ~18 px for effect lines, and "The Sad Onion"
+ * wraps one word per line.
+ *
+ * This is fisttp's result, built from the bit fields: wasm's own float->int
+ * truncation TRAPS out of range, which the x87 does not.
+ *   NaN, +-inf, |d| >= 2^63  -> 0x8000000000000000 (integer indefinite)
+ *   otherwise                -> d truncated toward zero */
+int64_t isaac_x87_trunc_i64(double d) {
+    uint64_t bits, m, mag;
+    uint32_t exp;
+    int32_t e;
+    memcpy(&bits, &d, 8);
+    exp = (uint32_t)(bits >> 52) & 0x7ffu;
+    if (exp == 0x7ffu) return (int64_t)0x8000000000000000ull;
+    if (exp < 0x3ffu) return 0;                          /* |d| < 1, zero, denormals */
+    e = (int32_t)exp - 0x3ff;
+    if (e >= 63) return (int64_t)0x8000000000000000ull;  /* out of range */
+    m = (bits & 0x000fffffffffffffull) | 0x0010000000000000ull;
+    mag = (e >= 52) ? (m << (e - 52)) : (m >> (52 - e));
+    return (bits >> 63) ? -(int64_t)mag : (int64_t)mag;
+}

@@ -246,6 +246,18 @@ REQUIRE emsdk on PATH:
   `00a671b0` packer 189→709 ms, `007706e0` item-ownership query 220→466 ms,
   `recomp_call_indirect` 462→791 ms, `00409120` sprite draw →332 ms. Do NOT
   chase "enemy queries" — the closest thing is `007706e0`, an item query.
+  **Round 90e FIXED the Item Info descriptions** (§21.113). Cause: every
+  layout's last-line width went through `0x00af0800` (CRT x87 float→int64),
+  whose `fisttp` fast path needs ISA cell `0xc7162c` ≥ 2 — **it reads 0 at
+  runtime** — and whose fallback tests an 80-bit exponent word the lifter
+  models as zero (`recomp_set80` zeroes bytes 8–9). Every result was 0, so the
+  panel's wrap limit collapsed ("The / Sad / Onion"). `WRAP_PATCHES[0x00af0800]`
+  now computes `fisttp`'s result from ST0 via `isaac_x87_trunc_i64`. Do **not**
+  "fix" this by forcing `0xc7162c` to 2: it has ~20 readers and a real writer
+  (`__isa_available_init`), and flipping it re-dispatches the whole CRT.
+  (`missing_fns.c`'s "2 reads / 0 writers" note is wrong.) **Other routines
+  with an x87 `fstp tbyte` + exponent test will have the same defect** — worth
+  a census.
   **Item Info (the descriptions unlocked after Mom) is gated by an option.**
   `ItemInfoDisplayEnabled=1` in `options.ini` — the minimal console-only
   options.ini the drivers seed does NOT set it, so the box can never render and

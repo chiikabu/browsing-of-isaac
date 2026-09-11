@@ -398,6 +398,37 @@ PURGE_PATCHES: dict[str, tuple[int, int]] = {
 # so the equivalence is measured on the game's own data, not assumed.
 # Each entry: va -> wrapper body text; the wrapper owns the callee's ret.
 WRAP_PATCHES: dict[int, str] = {
+    # The CRT's x87 float->int64 (round 90e): ST0 in, EDX:EAX out, ST0 popped,
+    # plain ret, ECX left holding the entry ESP. Not a speed wrapper -- a
+    # correctness one. Its fisttp fast path is gated on the ISA cell 0xc7162c,
+    # which reads 0 in this build, and the fallback it takes instead tests an
+    # 80-bit exponent word the lifter models as zero, so every result was 0.
+    # That zeroed the Item Info panel's last-line widths and collapsed its wrap
+    # limit ("The / Sad / Onion"). Two callers: 0x009f0290 (that layout) and
+    # 0x00acc8f0. There is no verify mode here on purpose: the lifted body IS
+    # the defect, so comparing against it would only report the bug. ISAAC_
+    # FASTPATH=0 still runs it, for the A/B.
+    0x00af0800: """void sub_00af0800(CpuState *restrict s) {
+  /* LIFT-PATCH wrap 0x00af0800: x87 ST0 -> int64 truncation (host_fastpath.c) */
+  RECOMP_VA(0xaf0800u);
+  if (isaac_fastpath_mode() == 0) { sub_00af0800__lifted(s); return; }
+  uint32_t esp0 = s->ESP;
+  int64_t v = isaac_x87_trunc_i64(recomp_get80(&s->ST0[0]));
+  s->EAX = (uint32_t)(uint64_t)v;
+  s->EDX = (uint32_t)((uint64_t)v >> 32);
+  s->ECX = esp0;                                   /* as the fast path leaves it */
+  /* fisttp pops ST0: the stack shifts down, exactly as the lifted fast path does */
+  memcpy(&s->ST0[0], &s->ST1[0], 10);
+  memcpy(&s->ST1[0], &s->ST2[0], 10);
+  memcpy(&s->ST2[0], &s->ST3[0], 10);
+  memcpy(&s->ST3[0], &s->ST4[0], 10);
+  memcpy(&s->ST4[0], &s->ST5[0], 10);
+  memcpy(&s->ST5[0], &s->ST6[0], 10);
+  memcpy(&s->ST6[0], &s->ST7[0], 10);
+  s->EIP = MEMR32(esp0);                           /* plain ret */
+  s->ESP = esp0 + 4u;
+}
+""",
     # The vertex-quad copy constructor (round 90d): `this` in ecx, the source
     # on the stack, `ret 4`, and EAX = this on the way out (MSVC ctor). 2.2% of
     # a loaded frame's self time goes here and every byte of it is overwritten

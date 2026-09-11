@@ -103,9 +103,15 @@ void sub_00aefe80(CpuState *restrict s) {
 }
 
 /* ---------------------------------------------------------------------- *
- * The CRT conversion family (all gated on the same zero-at-load BSS cell
- * 0xc7162c: 2 reads / 0 writers by linear census -- the fallback paths
- * below are what actually runs in this build).  Every result is bit-exact
+ * The CRT conversion family (all gated on the same ISA-level cell 0xc7162c).
+ * CORRECTED in round 90e: this said "2 reads / 0 writers by linear census",
+ * and that is wrong -- the lifted code has ~20 readers and a real writer,
+ * __isa_available_init, which sets 0/1/2/3/5 from CPUID. What IS true is that
+ * the cell reads 0 at runtime in this build (measured, frames 41 and 457), so
+ * the fallback paths below are what actually run. Do not "fix" a conversion
+ * by forcing the cell up: it re-dispatches every CRT routine that reads it.
+ * (0x00af0800's fallback was broken by exactly this -- see lift_patches.py.)
+ * Every result is bit-exact
  * to the original's fallback arithmetic (and to the SSE4.1 path, which
  * computes the same value).  No C float->int casts are used: wasm i32/i64
  * trunc instructions TRAP out of range, so all integer results are built

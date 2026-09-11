@@ -8180,3 +8180,59 @@ took 5,032 ms before and 5,021 ms after) and the boot is a little quicker.
 Verified alongside: mods 37/37, saves 15/15, EDIT FILE 11/11, and
 `ISAAC_ARCHIVE_VERIFY=1` on **both** read paths with eviction live -- every
 archive entry checksummed through the engine's own decoder, no mismatch.
+
+### 21.113 Round 90e: the item descriptions, and an exponent the port never had
+
+Reported: the Item Info descriptions (achievement 641, unlocked after Mom)
+render "readable but aligned weird". Reproducing it took three wrong turns,
+all mine, and each is worth a line because each one looked like progress:
+
+- The pickup banner was tested instead of the panel. Its text comes from a
+  different table; `info_display.xml` is the panel's.
+- The drivers' minimal options.ini never set `ItemInfoDisplayEnabled=1`, so
+  the panel could not render at all.
+- `achievement 641` was typed into a console that has no achievement command
+  (its hint bar lists spawn/goto/stage/gridspawn/debug/giveitem/remove). It
+  did nothing, and Item Info was never unlocked in any of those runs.
+
+With a real unlocked save (`make_unlocked_save.mjs`) and the option on, the
+panel shows it immediately: **"The / Sad / Onion"**, "+0.72 / Tears", the
+Abyss locust line in three pieces. The `<color=>` markup is parsed (the locust
+line is correctly red), glyph spacing is normal, and the wrapping is identical
+at 960x640, 1366x768 and 1920x1080 -- so not resolution, not scale, not fonts.
+
+The layout (`0x009f0290`) runs twice: a measure pass stores the widest line in
+`P+0x37c`, and the draw pass derives its wrap limit from that. Each layout's
+**last line** gets its width through `ceil` and then `0x00af0800`, the CRT's
+x87 float->int64 conversion. That routine's `fisttp` fast path is gated on the
+ISA-level cell `0xc7162c` being >= 2 -- **measured at runtime: 0**, at frame 41
+and frame 457. The fallback it takes instead does `fstp tbyte` and tests the
+**80-bit exponent word**; the lifter models an x87 register as a double in
+bytes 0..7 with bytes 8..9 zeroed (`recomp_set80`). The exponent reads 0, the
+"|x| < 1" branch runs, and **every conversion returns 0**. Last-line widths go
+to 0, the measured extent collapses to the x offset, and the draw limit falls
+to ~0 for the title and ~18 px for effect lines. Native x87 has a real
+exponent there; this is purely a port defect.
+
+`missing_fns.c` called `0xc7162c` "2 reads / 0 writers". It is not: the lifted
+code has ~20 readers and a real writer, `__isa_available_init`, which sets
+0/1/2/3/5 from CPUID. So forcing the cell to 2 would flip every CRT routine
+that dispatches on it, some possibly into SSE4.2 string instructions this
+lifter does not emulate. The fix is the routine instead:
+`WRAP_PATCHES[0x00af0800]` computes `fisttp`'s result directly from ST0
+(`isaac_x87_trunc_i64`, built from the bit fields because wasm's own float->int
+truncation traps out of range), writes EDX:EAX, leaves ECX at the entry ESP as
+the fast path does, and pops the stack the way the lifted `fisttp` does. It has
+two callers: the panel layout, and `0x00acc8f0`, reached only through a stored
+function pointer. There is no verify mode, on purpose: the lifted body *is*
+the defect. `ISAAC_FASTPATH=0` still runs it, for the A/B.
+
+    before   The / Sad / Onion     +0.72 / Tears     x1 locust / 1.5x Isaac's / damage
+    after    The Sad Onion         +0.72 Tears       x1 locust 1.5x Isaac's damage
+
+The A/B is one build: the same module under `?ISAAC_FASTPATH=0` draws the
+"before" row exactly, so the wrapper is the whole of the change.
+
+The helper was checked against `fisttp` on 24 values before building,
+including the out-of-range and NaN edges (integer indefinite,
+0x8000000000000000).
